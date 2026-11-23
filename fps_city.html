@@ -1,0 +1,1873 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>三维打僵尸</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000;
+    font-family: "Microsoft YaHei", sans-serif; color: #fff; user-select: none; }
+  canvas { display: block; }
+  #hud { position: fixed; top: 10px; left: 12px; font-size: 16px; line-height: 1.6;
+    text-shadow: 0 0 4px #000; pointer-events: none; }
+  #bhud { position: fixed; left: 12px; bottom: 12px; font-size: 17px;
+    text-shadow: 0 0 4px #000; pointer-events: none; }
+  #cross { position: fixed; left: 50%; top: 50%; width: 12px; height: 12px;
+    margin: -6px 0 0 -6px; pointer-events: none; }
+  #cross::before, #cross::after { content: ""; position: absolute; background: #fff; }
+  #cross::before { left: 5px; top: 0; width: 2px; height: 12px; }
+  #cross::after { top: 5px; left: 0; height: 2px; width: 12px; }
+  #flash { position: fixed; inset: 0; background: rgba(255,0,0,0.35);
+    opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 20px; box-sizing: border-box; }
+  #overlay h1 { font-size: 36px; margin: 0 0 10px; }
+  #overlay p { font-size: 15px; line-height: 1.8; opacity: 0.9; margin: 0 0 20px; }
+  #start { font-size: 20px; padding: 12px 40px; border: none; border-radius: 8px;
+    background: #e53935; color: #fff; cursor: pointer; font-family: inherit; }
+  #loadout { position: fixed; inset: 0; z-index: 5; display:none; align-items:center; justify-content:center; background:rgba(5,10,12,.88); }
+  #loadoutPanel { width:min(820px,92vw); padding:24px; border:1px solid #45d9e8; background:linear-gradient(135deg,#162326,#080d10); box-shadow:0 0 35px #00c8df55; }
+  #loadoutPanel h2 { color:#6cecf2; margin:0 0 14px; }
+  #loadoutItems { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; }
+  #loadoutItems button { padding:12px; color:#e4eeee; background:#26353a; border:1px solid #52686d; cursor:pointer; font:inherit; }
+  #loadoutItems button:hover { background:#23606a; }
+  #buildMenu { position:fixed; inset:0; z-index:6; display:none; align-items:center; justify-content:center; background:rgba(5,10,12,.88); }
+  #buildPanel { width:min(760px,92vw); padding:24px; border:1px solid #9fbd86; background:linear-gradient(135deg,#20291f,#0b100c); box-shadow:0 0 35px #8cc65a44; }
+  #buildPanel h2 { color:#b9e48c; margin:0 0 8px; }
+  #buildItems { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; margin-top:14px; }
+  #buildItems button { padding:12px; color:#e9f0e3; background:#303b2d; border:1px solid #697e5c; cursor:pointer; font:inherit; }
+  #buildItems button:hover { background:#526d3e; }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<div id="bhud"></div>
+<div id="cross"></div>
+<div id="flash"></div>
+<div id="overlay">
+  <h1 id="title">三维打僵尸</h1>
+  <p id="desc"></p>
+  <button id="start">开始</button>
+</div>
+<div id="loadout"><div id="loadoutPanel"><h2>战斗装备 · 按 F 关闭</h2><div id="loadoutItems"></div></div></div>
+<div id="buildMenu"><div id="buildPanel"><h2>基地建造 · 按 B 或 Esc 关闭</h2><div>选择后会在你面前放置；需要先搜刮足够材料。</div><div id="buildBalance" style="margin-top:10px;color:#d6efbd"></div><div id="buildItems"></div></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ================= 基础 =================
+const $ = id => document.getElementById(id);
+const hudEl = $("hud"), bhudEl = $("bhud"), flashEl = $("flash");
+const overlay = $("overlay"), titleEl = $("title"), descEl = $("desc"), startBtn = $("start");
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x858b86);
+scene.fog = new THREE.Fog(0x858b86, 35, 115);
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.05, 200);
+scene.add(camera);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x556644, 0.9));
+const sun = new THREE.DirectionalLight(0xc7c5ad, 0.62);
+sun.position.set(30, 50, 20);
+scene.add(sun);
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ================= 贴图 =================
+function canvasTex(draw) {
+  const c = document.createElement("canvas");
+  c.width = 128; c.height = 128;
+  draw(c.getContext("2d"));
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+const groundTex = canvasTex(g => {
+  g.fillStyle = "#6e6a52"; g.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 300; i++) {
+    g.fillStyle = Math.random() < 0.5 ? "rgba(0,60,0,0.12)" : "rgba(120,160,60,0.12)";
+    g.fillRect(Math.random() * 128, Math.random() * 128, 3, 3);
+  }
+});
+groundTex.repeat.set(65, 65);
+const wallTex = canvasTex(g => {
+  g.fillStyle = "#827d70"; g.fillRect(0, 0, 128, 128);
+  for (let r = 0; r < 2; r++) for (let c = 0; c < 2; c++) {
+    const x = 8 + c * 64, y = 12 + r * 58;
+    g.fillStyle = "#242d31"; g.fillRect(x, y, 46, 34);
+    g.strokeStyle = "#a69d88"; g.lineWidth = 3; g.strokeRect(x, y, 46, 34);
+    g.fillStyle = "#4d514d"; g.fillRect(x + 4, y + 4, 38, 26);
+    g.fillStyle = "rgba(20,22,20,.65)"; g.fillRect(x + 20, y + 4, 2, 26);
+  }
+  g.fillStyle = "rgba(35,32,27,.3)";
+  for (let i = 0; i < 90; i++) g.fillRect(Math.random()*128, Math.random()*128, 2+Math.random()*7, 1+Math.random()*3);
+  g.strokeStyle = "#373833"; g.lineWidth = 2;
+  for (const x of [29, 91]) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x-5, 25); g.lineTo(x+3, 46); g.lineTo(x-3, 70); g.lineTo(x+4, 96); g.lineTo(x, 128); g.stroke(); }
+});
+function wallMat(w, h) {
+  const t = wallTex.clone();
+  t.needsUpdate = true;
+  t.repeat.set(Math.max(1, w / 4), Math.max(1, h / 4));
+  return new THREE.MeshLambertMaterial({ map: t });
+}
+
+// ================= 地面 =================
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(260, 260), new THREE.MeshLambertMaterial({ map: groundTex }));
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// ================= 碰撞体（墙 AABB）与站立面 =================
+const walls = [];
+function addBox(x0, x1, y0, y1, z0, z1, color) {
+  const w = x1 - x0, h = y1 - y0, d = z1 - z0;
+  const mat = color === "wall" ? wallMat(w, h) : new THREE.MeshLambertMaterial({ color });
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  scene.add(m);
+  if (color === "wall") walls.push({ x0, x1, y0, y1, z0, z1 });
+}
+
+// 公寓：x 在 -7.5~7.5，z 在 -5.5~5.5，两层，高 8.5
+addBox(-7.5, 7.5, 0, 8.5, -5.5, -5, "wall"); // 北墙
+addBox(-7.5, -7, 0, 8.5, -5, 5, "wall");     // 西墙
+addBox(7, 7.5, 0, 8.5, -5, 5, "wall");       // 东墙
+addBox(-7.5, -1, 0, 8.5, 5, 5.5, "wall");    // 南墙（左）
+addBox(1, 7.5, 0, 8.5, 5, 5.5, "wall");      // 南墙（右）
+addBox(-1, 1, 6.5, 8.5, 5, 5.5, "wall");     // 门楣
+addBox(-2, 7, 3.8, 4, -5, 5, "#8d7b65");     // 二楼地板
+addBox(6, 7, 7.8, 8, -5, 5, "#8d7b65");      // 天台地板
+
+// 站立面：平地（flat）和斜坡楼梯（ramp）
+const surfaces = [
+  { t: "flat", x0: -130, x1: 130, z0: -130, z1: 130, y: 0 },
+  { t: "flat", x0: -2, x1: 7, z0: -5, z1: 5, y: 4 },
+  { t: "flat", x0: 6, x1: 7, z0: -5, z1: 5, y: 8 },
+  { t: "ramp", x0: -6, x1: -2, z0: -4, z1: 4, ya: 0, yb: 4 },
+  { t: "ramp", x0: 2, x1: 6, z0: -4, z1: 4, ya: 4, yb: 8 },
+];
+function rampMesh(x0, x1, ya, yb, z0, z1) {
+  const len = Math.hypot(x1 - x0, yb - ya);
+  const m = new THREE.Mesh(new THREE.BoxGeometry(len, 0.3, z1 - z0), new THREE.MeshLambertMaterial({ color: 0x8d7b65 }));
+  m.rotation.z = Math.atan2(yb - ya, x1 - x0);
+  m.position.set((x0 + x1) / 2, (ya + yb) / 2 - 0.15, (z0 + z1) / 2);
+  scene.add(m);
+}
+rampMesh(-6, -2, 0, 4, -4, 4);
+rampMesh(2, 6, 4, 8, -4, 4);
+
+function surfaceY(s, x) {
+  if (s.t === "flat") return s.y;
+  return s.ya + (s.yb - s.ya) * (x - s.x0) / (s.x1 - s.x0);
+}
+// 在 (x,z) 处、接近 ref 高度的最高站立面
+function groundAt(x, z, ref) {
+  let best = -Infinity;
+  for (const s of surfaces) {
+    if (x < s.x0 || x > s.x1 || z < s.z0 || z > s.z1) continue;
+    const y = surfaceY(s, x);
+    if (y <= ref + 0.6 && y > best) best = y;
+  }
+  return best === -Infinity ? 0 : best;
+}
+const PR = 0.35;
+function hitsWall(x, z, feet) {
+  for (const w of walls) {
+    if (feet + 1.7 < w.y0 || feet > w.y1) continue;
+    if (x + PR > w.x0 && x - PR < w.x1 && z + PR > w.z0 && z - PR < w.z1) return true;
+  }
+  return false;
+}
+function inWallPoint(x, y, z) {
+  for (const w of walls) {
+    if (x > w.x0 && x < w.x1 && y > w.y0 && y < w.y1 && z > w.z0 && z < w.z1) return true;
+  }
+  return false;
+}
+function inBuilding(x, z) { return x > -8 && x < 8 && z > -6 && z < 6; }
+
+// 射线与 AABB 相交，返回进入距离
+function rayBox(o, d, b) {
+  let tmin = -Infinity, tmax = Infinity;
+  const mins = [b.x0, b.y0, b.z0], maxs = [b.x1, b.y1, b.z1];
+  const os = [o.x, o.y, o.z], ds = [d.x, d.y, d.z];
+  for (let i = 0; i < 3; i++) {
+    if (Math.abs(ds[i]) < 1e-9) {
+      if (os[i] < mins[i] || os[i] > maxs[i]) return Infinity;
+    } else {
+      let t1 = (mins[i] - os[i]) / ds[i], t2 = (maxs[i] - os[i]) / ds[i];
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      tmin = Math.max(tmin, t1);
+      tmax = Math.min(tmax, t2);
+      if (tmin > tmax) return Infinity;
+    }
+  }
+  return tmin > 0 ? tmin : (tmax > 0 ? 0 : Infinity);
+}
+
+// ================= 炮台 =================
+const turrets = [];
+function makeTurret(x, y, z, type) {
+  const g = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.BoxGeometry(1, 0.6, 1), new THREE.MeshLambertMaterial({ color: 0x37474f }));
+  base.position.y = 0.3;
+  g.add(base);
+  const len = type === "C" ? 1.8 : 1.2, r = type === "C" ? 0.22 : 0.09;
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 10),
+    new THREE.MeshLambertMaterial({ color: type === "C" ? 0xff5722 : 0x9e9e9e }));
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 0.9, -len / 2 + 0.2);
+  g.add(barrel);
+  g.position.set(x, y, z);
+  scene.add(g);
+  const t = { x, y, z, type, mesh: g };
+  turrets.push(t);
+  return t;
+}
+makeRealTurret(-0.5, 4, -3, "T"); // 二楼机枪
+makeRealTurret(6.5, 8, -3, "C");  // 天台大炮
+
+// ================= 森林、废弃汽车、坦克 =================
+const tank = { x: -16, y: 0, z: 10, yaw: 0, mesh: null };
+
+// ================= 音效（合成）、战斗机、末世地表 =================
+let actx = null, engine = null;
+function initSound() {
+  if (!actx) {
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function tone(f, dur, type, vol, slideTo) {
+  if (!actx) return;
+  const t0 = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f, t0);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  o.connect(g).connect(actx.destination);
+  o.start(t0);
+  o.stop(t0 + dur + 0.02);
+}
+function noiseBurst(dur, vol) {
+  if (!actx) return;
+  const len = Math.floor(actx.sampleRate * dur);
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const s = actx.createBufferSource();
+  s.buffer = buf;
+  const g = actx.createGain();
+  g.gain.value = vol;
+  s.connect(g).connect(actx.destination);
+  s.start();
+}
+function sfxBoom() { noiseBurst(0.5, 0.55); tone(88, 0.58, "sine", 0.52, 24); tone(43, 0.5, "triangle", 0.32, 22); }
+function sfxShot() { noiseBurst(0.11, 0.36); tone(210, 0.12, "square", 0.18, 52); }
+function sfxRifle() { noiseBurst(0.12, 0.42); tone(145, 0.13, "sawtooth", 0.2, 38); tone(620, 0.025, "square", 0.08, 180); }
+function sfxCannon() { noiseBurst(0.48, 0.62); tone(64, 0.58, "sawtooth", 0.38, 19); tone(36, 0.5, "sine", 0.35, 20); }
+function sfxMachineGun() { noiseBurst(0.09, 0.3); tone(185, 0.09, "square", 0.16, 48); }
+function sfxSaw() { tone(95, 0.16, "sawtooth", 0.08, 65); }
+function sfxFlame() { noiseBurst(0.07, 0.08); tone(75, 0.1, "sawtooth", 0.035, 45); }
+function sfxBomb() { tone(90, 0.5, "sine", 0.34, 24); noiseBurst(0.42, 0.32); }
+function useMedkit() { if (P.medkits <= 0 || P.hp >= 100) return; P.medkits--; P.hp = Math.min(100, P.hp + 45); P.regenWait = 0; tone(660,0.18,"sine",0.12,880); }
+function sfxTankEngine() { if (!actx) return; tone(52 + Math.random()*12, 0.22, "sawtooth", 0.035, 38); }
+// 引擎持续声：坦克低沉，飞机尖锐
+function engineStart(kind) {
+  if (!actx || engine) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = kind === "plane" ? "sawtooth" : "square";
+  o.frequency.value = kind === "plane" ? 140 : 55;
+  g.gain.value = 0.04;
+  o.connect(g).connect(actx.destination);
+  o.start();
+  engine = { o, g, kind };
+}
+function engineUpdate(level) {
+  if (!engine || !actx) return;
+  if (engine.kind === "tank" && level > 0.5 && Math.random() < 0.1) sfxTankEngine();
+  const base = engine.kind === "plane" ? 140 : 55;
+  const range = engine.kind === "plane" ? 300 : 90;
+  engine.o.frequency.setTargetAtTime(base + level * range, actx.currentTime, 0.1);
+  engine.g.gain.setTargetAtTime(0.03 + level * 0.05, actx.currentTime, 0.1);
+}
+function engineStop() {
+  if (engine) {
+    try { engine.o.stop(); } catch (e) {}
+    engine = null;
+  }
+}
+
+// 战斗机：W/S 油门，鼠标控制机头，空格上升、Ctrl 下降，左键机炮，Q 导弹，G 下机
+const PLANE_HOME = { x: 10, y: 0, z: -10, yaw: 0 };
+const plane = { ...PLANE_HOME, speed: 0, mesh: null, mcd: 0, bombCd: 0, fp: false, beacon: null, destroyed: false, respawnTimer: 0 };
+function buildPlane() {
+  const g = new THREE.Group();
+  const grey = new THREE.MeshLambertMaterial({ color: 0x6b7480 });
+  const dark = new THREE.MeshLambertMaterial({ color: 0x2a2f36 });
+  const fus = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.5, 9, 12), grey);
+  fus.rotation.x = Math.PI / 2;
+  fus.position.set(0, 1.2, 0);
+  g.add(fus);
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.7, 12, 8), grey);
+  nose.position.set(0, 1.2, -4.5);
+  g.add(nose);
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(12, 0.15, 2.6), grey);
+  wing.position.set(0, 1.2, 0);
+  g.add(wing);
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(0.15, 2.4, 2), grey);
+  tail.position.set(0, 2.2, 4);
+  g.add(tail);
+  const hstab = new THREE.Mesh(new THREE.BoxGeometry(5, 0.12, 1.4), grey);
+  hstab.position.set(0, 1.5, 4);
+  g.add(hstab);
+  for (const sx of [-4.2, 4.2]) {
+    const pod = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 2.2, 8), dark);
+    pod.rotation.x = Math.PI / 2;
+    pod.position.set(sx, 0.7, -0.5);
+    g.add(pod);
+  }
+  const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.6, 10, 8), new THREE.MeshLambertMaterial({ color: 0x3a6a9a, transparent: true, opacity: 0.7 }));
+  canopy.position.set(0, 1.9, -1);
+  canopy.scale.set(1, 0.8, 1.6);
+  g.add(canopy);
+  scene.add(g);
+  plane.mesh = g;
+  g.position.set(plane.x, plane.y, plane.z);
+  const marker = new THREE.Group();
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(2.2, 0.12, 8, 28), new THREE.MeshBasicMaterial({ color: 0xffc247 }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.12; marker.add(ring);
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.45, 5, 10, 1, true), new THREE.MeshBasicMaterial({ color: 0xffc247, transparent: true, opacity: 0.3, side: THREE.DoubleSide }));
+  beam.position.y = 2.7; marker.add(beam); marker.position.set(plane.x, 0, plane.z); scene.add(marker); plane.beacon = marker;
+}
+function nearPlane() {
+  return !plane.destroyed && !P.flying && Math.hypot(plane.x - P.x, plane.z - P.z) < 12 && P.y < 4;
+}
+function resetPlane() {
+  Object.assign(plane, PLANE_HOME, { speed: 0, mcd: 0, bombCd: 0, fp: false, destroyed: false, respawnTimer: 0 });
+  if (plane.mesh) {
+    plane.mesh.position.set(plane.x, plane.y, plane.z);
+    plane.mesh.rotation.set(0, plane.yaw, 0);
+    plane.mesh.visible = true;
+  }
+  if (plane.beacon) plane.beacon.visible = true;
+}
+function enterPlane() {
+  if (plane.destroyed) return;
+  if (!plane.mesh) buildPlane();
+  if (P.flying) return;
+  P.armorActive=false; P.armor=false; P.vehicle=null; P.turret=null;
+  if (plane.beacon) plane.beacon.visible=false;
+  if (plane.mesh) plane.mesh.visible=false;
+  P.flying = true;
+  engineStop();
+  P.vehicle = null;
+  P.turret = null;
+  P.yaw = plane.yaw;
+  P.pitch = 0;
+  plane.fp = false;
+  P.x = plane.x; P.z = plane.z; P.y = plane.y;
+  initSound(); engineStart("plane");
+}
+function exitPlane() {
+  P.flying = false;
+  if (plane.mesh) plane.mesh.visible=true;
+  if (plane.beacon) plane.beacon.visible=true;
+  plane.fp = false;
+  plane.speed = 0;
+  engineStop();
+  plane.yaw = P.yaw;
+  P.x = plane.x + 6;
+  P.z = plane.z;
+  plane.y = groundAt(plane.x, plane.z, 0);
+  P.y = groundAt(P.x, P.z, plane.y);
+}
+function crash() {
+  explode(plane.x, plane.y, plane.z);
+  exitPlane();
+  plane.destroyed = true;
+  plane.respawnTimer = 8;
+  if (plane.mesh) plane.mesh.visible = false;
+  if (plane.beacon) plane.beacon.visible = false;
+  damage(60);
+}
+function planeMissile() {
+  if (plane.mcd > 0) return;
+  plane.mcd = 1.2;
+  const forward = dirVec(P.yaw, 0);
+  // Release a guided missile from beneath the aircraft, independent of the aiming reticle.
+  launchRocket({ x: plane.x, y: plane.y - 1.25, z: plane.z },
+    { x: forward.x * 0.62, y: -0.78, z: forward.z * 0.62 }, { homing: true });
+  sfxCannon();
+}
+function planeBomb() {
+  if (plane.bombCd > 0) return;
+  plane.bombCd = 1.1;
+  const d = dirVec(P.yaw, P.pitch);
+  const o = { x: plane.x + d.x * 1.8, y: plane.y - 0.8, z: plane.z + d.z * 1.8 };
+  muzzleSpark(o,d,0xffbd52,5);
+  projectiles.push({ x: o.x, y: o.y, z: o.z, vx: d.x * Math.max(12, plane.speed * 0.65), vy: -2, vz: d.z * Math.max(12, plane.speed * 0.65), life: 3.2, dead: false, mesh: (() => { const m = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), new THREE.MeshLambertMaterial({ color: 0x29302b })); scene.add(m); return m; })() });
+  sfxBomb();
+}
+function planeFly(dt) {
+  const pl = plane;
+  pl.yaw = P.yaw;
+  pl.mcd = Math.max(0, pl.mcd - dt);
+  pl.bombCd = Math.max(0, pl.bombCd - dt);
+  if (keys.KeyW) pl.speed = Math.min(60, pl.speed + 18 * dt);
+  if (keys.KeyS) pl.speed = Math.max(0, pl.speed - 22 * dt);
+  const cp = Math.cos(P.pitch), sp = Math.sin(P.pitch);
+  const fx = -Math.sin(P.yaw) * cp, fz = -Math.cos(P.yaw) * cp;
+  pl.x = Math.max(-125, Math.min(125, pl.x + fx * pl.speed * dt));
+  pl.z = Math.max(-125, Math.min(125, pl.z + fz * pl.speed * dt));
+  let vy = sp * pl.speed;
+  // Give the aircraft strong vertical thrust so it can take off immediately without a runway.
+  if (keys.Space) vy += 26;
+  if (keys.ControlLeft) vy -= 18;
+  if (pl.speed < 30) vy -= (30 - pl.speed) * 0.5;
+  pl.y += vy * dt;
+  pl.y = Math.min(pl.y, 200);
+  if (inWallPoint(pl.x, pl.y, pl.z)) { crash(); return; }
+  const gy = groundAt(pl.x, pl.z, pl.y);
+  if (pl.y <= gy + 0.8) {
+    // Slow or stationary aircraft should settle on the runway, not crash on the first frame after boarding.
+    if (pl.speed > 30 && vy < -12) { crash(); return; }
+    pl.y = gy + 0.8;
+    pl.speed = Math.max(0, pl.speed - 30 * dt);
+  }
+  P.x = pl.x; P.z = pl.z; P.y = pl.y;
+  if (mouseDown) {
+    if (P.fireCd <= 0) {
+      P.fireCd = 0.1;
+      shootRay(eyePos(), dirVec(P.yaw, P.pitch), 1);
+      sfxMachineGun();
+    }
+  }
+  if (pl.mesh) {
+    pl.mesh.position.set(pl.x, pl.y, pl.z);
+    pl.mesh.rotation.set(-P.pitch * 0.5, pl.yaw, 0);
+  }
+}
+
+// 末世地表：裂开的混凝土路，杂草丛生的地面
+const concreteTex = canvasTex(g => {
+  g.fillStyle = "#8a8a86";
+  g.fillRect(0, 0, 128, 128);
+  g.strokeStyle = "rgba(35,35,35,0.55)";
+  g.lineWidth = 1.5;
+  for (let i = 0; i < 7; i++) {
+    g.beginPath();
+    let x = Math.random() * 128, y = Math.random() * 128;
+    g.moveTo(x, y);
+    for (let k = 0; k < 6; k++) {
+      x += (Math.random() - 0.5) * 34;
+      y += (Math.random() - 0.5) * 34;
+      g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+});
+function addRoads() {
+  const rt1 = concreteTex.clone();
+  rt1.needsUpdate = true;
+  rt1.repeat.set(1, 20);
+  const rt2 = concreteTex.clone();
+  rt2.needsUpdate = true;
+  rt2.repeat.set(20, 1);
+  const r1 = new THREE.Mesh(new THREE.PlaneGeometry(14, 260), new THREE.MeshLambertMaterial({ map: rt1 }));
+  r1.rotation.x = -Math.PI / 2;
+  r1.position.y = 0.03;
+  scene.add(r1);
+  const r2 = new THREE.Mesh(new THREE.PlaneGeometry(260, 14), new THREE.MeshLambertMaterial({ map: rt2 }));
+  r2.rotation.x = -Math.PI / 2;
+  r2.position.y = 0.03;
+  scene.add(r2);
+}
+function addWeeds(n) {
+  const mats = [
+    new THREE.MeshLambertMaterial({ color: 0x4a6b2a }),
+    new THREE.MeshLambertMaterial({ color: 0x7a7a3a }),
+    new THREE.MeshLambertMaterial({ color: 0x5b4a2a }),
+  ];
+  for (let i = 0; i < n; i++) {
+    const x = (Math.random() * 2 - 1) * 120, z = (Math.random() * 2 - 1) * 120;
+    if (Math.abs(x) < 9 || Math.abs(z) < 9) continue;
+    const roadMargin = 8.5;
+    const onRoad = Math.abs(x) < roadMargin || Math.abs(z) < roadMargin;
+    if (inCity(x, z) && onRoad) continue;
+    const w = new THREE.Mesh(new THREE.ConeGeometry(0.25 + Math.random() * 0.25, 0.6 + Math.random() * 0.6, 5),
+      mats[Math.floor(Math.random() * mats.length)]);
+    w.position.set(x, 0.3, z);
+    scene.add(w);
+  }
+}
+
+function addCityRubble() {
+  const rubbleMats = [0x57564d, 0x777468, 0x414440, 0x918b7b].map(color => new THREE.MeshLambertMaterial({ color }));
+  for (const r of cityRects) {
+    const count = 5 + Math.floor(Math.random() * 7);
+    for (let i = 0; i < count; i++) {
+      const x = r.x0 + Math.random() * (r.x1 - r.x0), z = r.z0 + Math.random() * (r.z1 - r.z0);
+      const h = 0.08 + Math.random() * 0.35, size = 0.18 + Math.random() * 0.65;
+      const rubble = new THREE.Mesh(new THREE.BoxGeometry(size, h, size * (0.6 + Math.random())), rubbleMats[Math.floor(Math.random() * rubbleMats.length)]);
+      rubble.position.set(x, h / 2, z); rubble.rotation.y = Math.random() * Math.PI; scene.add(rubble);
+    }
+    const frontZ = Math.random() < 0.5 ? r.z0 - 0.09 : r.z1 + 0.09;
+    for (let row = 0; row < 3; row++) {
+      const windows = Math.max(2, Math.floor((r.x1-r.x0)/4));
+      for (let col = 0; col < windows; col++) {
+        if (Math.random() < 0.42) continue;
+        const x = r.x0 + (col + 0.5) * (r.x1-r.x0) / windows;
+        const y = 3.2 + row * 3.5;
+        const pane = new THREE.Mesh(new THREE.BoxGeometry(1.25, 1.65, 0.05), new THREE.MeshBasicMaterial({ color: 0x252b2b }));
+        pane.position.set(x, y, frontZ); scene.add(pane);
+        if (Math.random() < 0.12) {
+          const shard = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.7, 0.08), new THREE.MeshLambertMaterial({ color: 0x91a09a }));
+          shard.position.set(x+0.35, y-0.45, frontZ-0.08); shard.rotation.z = 0.65; scene.add(shard);
+        }
+      }
+    }
+  }
+  // Roadside weeds leave the cracked concrete lanes readable.
+  const mats = [0x52643a, 0x6b7042, 0x3f5635].map(color => new THREE.MeshLambertMaterial({ color }));
+  for (let i = 0; i < 130; i++) {
+    const x = (Math.random() * 2 - 1) * 120, z = (Math.random() * 2 - 1) * 120;
+    if (!inCity(x, z) || Math.abs(x) < 8.5 || Math.abs(z) < 8.5) continue;
+    for (let j = 0; j < 3; j++) {
+      const h = 0.3 + Math.random() * 0.75;
+      const weed = new THREE.Mesh(new THREE.ConeGeometry(0.08 + Math.random() * 0.08, h, 4), mats[Math.floor(Math.random() * mats.length)]);
+      weed.position.set(x + (Math.random() - 0.5) * 0.7, h / 2, z + (Math.random() - 0.5) * 0.7); scene.add(weed);
+    }
+  }
+  // Broken masonry and exposed dark window openings make each apartment look abandoned.
+  const debris = [0x504e47, 0x777367, 0x393a36].map(color => new THREE.MeshLambertMaterial({ color }));
+  for (const r of cityRects) {
+    const sideZ = Math.random() < 0.5 ? r.z0 - 0.06 : r.z1 + 0.06;
+    for (let i = 0; i < 3; i++) {
+      const bx = r.x0 + (i + 0.5) * (r.x1 - r.x0) / 5;
+      const slab = new THREE.Mesh(new THREE.BoxGeometry(1.2 + Math.random() * 1.5, 0.35 + Math.random() * 0.45, 0.28), debris[Math.floor(Math.random() * debris.length)]);
+      slab.position.set(bx, 1.1 + Math.random() * 3, sideZ); slab.rotation.z = (Math.random() - 0.5) * 0.7; scene.add(slab);
+    }
+  }
+}
+
+// ================= 可破坏物（树、车）、喷火、真实炮台、城市 =================
+const destructibles = [];
+const cityRects = [];
+
+function inCity(x, z) {
+  for (const r of cityRects) {
+    if (x > r.x0 - 1 && x < r.x1 + 1 && z > r.z0 - 1 && z < r.z1 + 1) return true;
+  }
+  return false;
+}
+
+const lootItems = [];
+const resources = { wood: 0, iron: 0, aluminum: 0 };
+const lootTotals = { wood: 0, iron: 0, aluminum: 0, med: 0 };
+let lootNotice = "", lootNoticeTimer = 0;
+function buildApartments() {
+  const matFloor = new THREE.MeshLambertMaterial({ color: 0x514d43 });
+  const matWall = new THREE.MeshLambertMaterial({ color: 0x6d685c });
+  const lootMats = {
+    wood: new THREE.MeshStandardMaterial({ color: 0x987044, roughness: 0.88 }),
+    iron: new THREE.MeshStandardMaterial({ color: 0x626b70, roughness: 0.48, metalness: 0.62 }),
+    aluminum: new THREE.MeshStandardMaterial({ color: 0xbac5c8, roughness: 0.3, metalness: 0.8 }),
+    med: new THREE.MeshStandardMaterial({ color: 0xb7a58a, roughness: 0.65 })
+  };
+  const addLoot = (kind, x, z, y=0) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.62, 0.62), lootMats[kind]);
+    mesh.position.set(x, y + 0.5, z); scene.add(mesh);
+    const color = kind === "med" ? 0x75ff9b : kind === "wood" ? 0xffbd68 : kind === "iron" ? 0x9dd2ff : 0xd8f4ff;
+    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.9 }));
+    glow.position.set(x, y + 1.1, z); scene.add(glow);
+    const marker = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.06, 6, 18), new THREE.MeshBasicMaterial({ color }));
+    marker.rotation.x = -Math.PI / 2; marker.position.set(x, y + 0.08, z); scene.add(marker);
+    lootItems.push({ kind, x, y, z, mesh, glow, marker });
+  };
+  let dropIndex = 0;
+  const dropKinds = ["wood","iron","aluminum","med"];
+  for (const r of cityRects) {
+    const cx=(r.x0+r.x1)/2, cz=(r.z0+r.z1)/2, w=r.x1-r.x0-0.6, d=r.z1-r.z0-0.6;
+    const floor=new THREE.Mesh(new THREE.BoxGeometry(w,0.18,d),matFloor); floor.position.set(cx,0.12,cz); scene.add(floor);
+    const roof=5.8;
+    for(const [x0,x1,z0,z1] of [[r.x0,r.x1,r.z0,r.z0+0.3],[r.x0,r.x1,r.z1-0.3,r.z1],[r.x0,r.x0+0.3,r.z0,r.z1],[r.x1-0.3,r.x1,r.z0,r.z1]]) {
+      const doorOnSide = (Math.abs(x0-r.x0)<0.01 && Math.abs(z1-z0)>4) || (Math.abs(z0-r.z0)<0.01 && Math.abs(x1-x0)>4);
+      if (doorOnSide) continue;
+      const wall=new THREE.Mesh(new THREE.BoxGeometry(x1-x0,roof,z1-z0),matWall); wall.position.set((x0+x1)/2,roof/2,(z0+z1)/2); scene.add(wall);
+    }
+    for(let k=0;k<2;k++) {
+      const kind=dropKinds[(dropIndex+k)%dropKinds.length];
+      const x=cx+(Math.random()-0.5)*w*0.45, z=cz+(Math.random()-0.5)*d*0.45;
+      addLoot(kind,x,z,0);
+    }
+    dropIndex++;
+  }
+  // Put clear, reachable supplies inside the central apartment, including the upper floor.
+  addLoot("wood", -4, 1, 0); addLoot("iron", 4, 1, 0);
+  addLoot("aluminum", 3, -2, 4); addLoot("med", -3, -2, 0);
+}
+function collectLoot(force=false) {
+  const range = force ? 12 : 2.8;
+  let item=null, nearest=range;
+  for (const drop of lootItems) {
+    const d=Math.hypot(drop.x-P.x,drop.z-P.z);
+    if(d<nearest && Math.abs(P.y-drop.y)<4.5){item=drop;nearest=d;}
+  }
+  if(!item) return false;
+  if(item.kind==="med") { P.medkits++; lootTotals.med++; lootNotice="医疗包 +1"; }
+  else { resources[item.kind] += 3; lootTotals[item.kind] += 3; lootNotice=`${({wood:"木材",iron:"铁",aluminum:"铝"})[item.kind]} +3`; }
+  lootNoticeTimer=2.5;
+  scene.remove(item.mesh); scene.remove(item.glow); scene.remove(item.marker); lootItems.splice(lootItems.indexOf(item),1); sfxShot(); return true;
+}
+
+function addDestructible(mesh, kind, hp, box) {
+  walls.push(box);
+  destructibles.push({ mesh, kind, hp, box, dead: false });
+}
+
+function smokePuff(x, y, z) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(1, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0x555555, transparent: true, opacity: 0.7 }));
+  m.position.set(x, y, z);
+  scene.add(m);
+  effects.push({ mesh: m, life: 0.35, grow: true });
+}
+
+function destroyDestructible(d) {
+  if (d.dead) return;
+  d.dead = true;
+  scene.remove(d.mesh);
+  const i = walls.indexOf(d.box);
+  if (i >= 0) walls.splice(i, 1);
+  smokePuff((d.box.x0 + d.box.x1) / 2, 1.2, (d.box.z0 + d.box.z1) / 2);
+}
+
+// 火箭弹爆炸时，附近的树和车会受损
+function damageDestructibles(x, y, z, r, amt) {
+  for (const d of destructibles) {
+    if (d.dead) continue;
+    const cx = (d.box.x0 + d.box.x1) / 2, cz = (d.box.z0 + d.box.z1) / 2;
+    const half = Math.max(d.box.x1 - d.box.x0, d.box.z1 - d.box.z0) / 2;
+    if (Math.hypot(cx - x, cz - z) < r + half) {
+      d.hp -= amt;
+      if (d.hp <= 0) destroyDestructible(d);
+    }
+  }
+  for (let i = destructibles.length - 1; i >= 0; i--) {
+    if (destructibles[i].dead) destructibles.splice(i, 1);
+  }
+}
+
+// 喷火枪：按住射击时向前喷火，烧僵尸、烧树、烧车
+let flameTick = 0;
+function updateFlame(dt) {
+  if (P.weapon !== 3 || P.turret || P.vehicle || !mouseDown || over || !running) {
+    flameTick = 0;
+    return;
+  }
+  flameTick -= dt;
+  if (flameTick > 0) return;
+  flameTick = 0.12;
+  sfxFlame();
+  P.kick=0.2;
+  muzzleSpark(eyePos(),dirVec(P.yaw,P.pitch),0xff6a18,7);
+  const fx = -Math.sin(P.yaw), fz = -Math.cos(P.yaw);
+  for (let i = 0; i < 3; i++) {
+    const r = 1.5 + Math.random() * 3.5;
+    const m = new THREE.Mesh(new THREE.SphereGeometry(0.22, 6, 6),
+      new THREE.MeshBasicMaterial({ color: Math.random() < 0.5 ? 0xff7a18 : 0xffd54f }));
+    m.position.set(P.x + fx * r + (Math.random() - 0.5) * 0.8,
+      P.y + 1.4 + (Math.random() - 0.5) * 0.5,
+      P.z + fz * r + (Math.random() - 0.5) * 0.8);
+    scene.add(m);
+    effects.push({ mesh: m, life: 0.25 });
+  }
+  const inCone = (x, z) => {
+    const vx = x - P.x, vz = z - P.z, dist = Math.hypot(vx, vz);
+    return dist < 6 && dist > 0.01 && (vx * fx + vz * fz) / dist > 0.7;
+  };
+  for (const zb of zombies) {
+    if (!zb.dead && inCone(zb.x, zb.z)) hurtZombie(zb, 0.5);
+  }
+  for (const d of destructibles) {
+    if (d.dead) continue;
+    const cx = (d.box.x0 + d.box.x1) / 2, cz = (d.box.z0 + d.box.z1) / 2;
+    if (inCone(cx, cz)) {
+      d.hp -= 0.25;
+      if (d.hp <= 0) destroyDestructible(d);
+    }
+  }
+  for (let i = destructibles.length - 1; i >= 0; i--) {
+    if (destructibles[i].dead) destructibles.splice(i, 1);
+  }
+}
+
+// 炮台：真实模型，炮管会跟着玩家瞄准的方向转动
+const _mv = new THREE.Vector3();
+function turretMuzzle(t) {
+  t.muzzle.getWorldPosition(_mv);
+  return { x: _mv.x, y: _mv.y, z: _mv.z };
+}
+
+function muzzleFlash(p) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 8), new THREE.MeshBasicMaterial({ color: 0xffdd55 }));
+  m.position.set(p.x, p.y, p.z);
+  scene.add(m);
+  effects.push({ mesh: m, life: 0.06 });
+}
+
+function makeRealTurret(x, y, z, type) {
+  const g = new THREE.Group();
+  const steel = new THREE.MeshLambertMaterial({ color: 0x3e4437, flatShading: true });
+  const dark = new THREE.MeshLambertMaterial({ color: 0x191b19, flatShading: true });
+  const sand = new THREE.MeshLambertMaterial({ color: 0xc2a878 });
+  const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.2, 0.4, 14), steel);
+  pad.position.y = 0.2;
+  g.add(pad);
+  for (let i = -2; i <= 2; i++) {
+    const bag = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.5, 0.6), sand);
+    bag.position.set(i * 0.95, 0.25, 1.3);
+    g.add(bag);
+  }
+  const head = new THREE.Group();
+  head.position.y = 0.4;
+  g.add(head);
+  const gun = new THREE.Group();
+  gun.position.y = type === "C" ? 0.9 : 0.5;
+  head.add(gun);
+  const barrelLen = type === "C" ? 2.6 : 1.3;
+  const barrelR = type === "C" ? 0.2 : 0.05;
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(barrelR, barrelR, barrelLen, 10), dark);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 0, -barrelLen / 2);
+  gun.add(barrel);
+  const muzzle = new THREE.Object3D();
+  muzzle.position.set(0, 0, -barrelLen - 0.1);
+  gun.add(muzzle);
+  if (type === "C") {
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.8, 1.8), steel);
+    hull.position.y = 0.4;
+    head.add(hull);
+    const cupola = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.4, 0.3, 10), steel);
+    cupola.position.set(0.4, 1.0, 0.3);
+    head.add(cupola);
+    const mantlet = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.7, 0.5), steel);
+    mantlet.position.set(0, 0, -0.35);
+    gun.add(mantlet);
+    const brake = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.3, 10), dark);
+    brake.rotation.x = Math.PI / 2;
+    brake.position.set(0, 0, -barrelLen + 0.1);
+    gun.add(brake);
+  } else {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.5, 0.9), steel);
+    box.position.y = -0.1;
+    head.add(box);
+    const shield = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.6, 0.08), steel);
+    shield.position.set(0, 0.1, -0.5);
+    head.add(shield);
+    const ammo = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.3, 0.5), new THREE.MeshLambertMaterial({ color: 0x5c6b3a }));
+    ammo.position.set(0.6, -0.1, 0.1);
+    head.add(ammo);
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.25, 0.15), dark);
+    grip.position.set(0, -0.3, 0.1);
+    gun.add(grip);
+  }
+  g.position.set(x, y, z);
+  scene.add(g);
+  const t = { x, y, z, type, mesh: g, head, gun, muzzle, yaw: 0, pitch: 0, soundCd: 0 };
+  turrets.push(t);
+  return t;
+}
+
+function updateTurrets(dt) {
+  for (const t of turrets) {
+    t.soundCd = Math.max(0, t.soundCd - dt);
+    const operating = P.turret === t;
+    const ty = operating ? P.yaw : 0;
+    const tp = operating ? P.pitch : 0;
+    t.head.rotation.y += (ty - t.head.rotation.y) * Math.min(1, dt * 8);
+    t.gun.rotation.x += (tp - t.gun.rotation.x) * Math.min(1, dt * 8);
+  }
+}
+
+// ================= 基地建造 =================
+let buildOpen = false;
+const buildMenuEl = $("buildMenu"), buildItemsEl = $("buildItems"), buildBalanceEl = $("buildBalance");
+const buildCosts = {
+  "机枪炮台": { wood: 2, iron: 8, aluminum: 5 },
+  "铁门": { wood: 0, iron: 5, aluminum: 3 },
+  "铁墙": { wood: 0, iron: 3, aluminum: 2 },
+  "床": { wood: 3, iron: 1, aluminum: 0 }
+};
+const builtColliders = [];
+function buildCostText(cost) {
+  return `木材 ${cost.wood} · 铁 ${cost.iron} · 铝 ${cost.aluminum}`;
+}
+function hasBuildMaterials(cost) {
+  return resources.wood >= cost.wood && resources.iron >= cost.iron && resources.aluminum >= cost.aluminum;
+}
+function refreshBuildBalance() {
+  buildBalanceEl.textContent = `拥有：木材 ${resources.wood} · 铁 ${resources.iron} · 铝 ${resources.aluminum}`;
+}
+function toggleBuildMenu(force) {
+  if (P.flying || P.vehicle || P.turret || P.armorActive) return;
+  buildOpen = force === undefined ? !buildOpen : force;
+  buildMenuEl.style.display = buildOpen ? "flex" : "none";
+  if (buildOpen) { document.exitPointerLock?.(); refreshBuildBalance(); }
+}
+function buildPlacement() {
+  const f = dirVec(P.yaw, 0), dist = 5;
+  return { x: Math.round((P.x + f.x * dist) * 2) / 2, z: Math.round((P.z + f.z * dist) * 2) / 2, y: groundAt(P.x + f.x * dist, P.z + f.z * dist, P.y) };
+}
+function addBuildCollider(x,z,hx,hz,height) {
+  const box = { x0:x-hx, x1:x+hx, y0:0, y1:height, z0:z-hz, z1:z+hz };
+  walls.push(box); builtColliders.push(box);
+}
+function buildAt(name) {
+  const cost = buildCosts[name];
+  if (!cost) return;
+  if (!hasBuildMaterials(cost)) { buildBalanceEl.textContent = `材料不足。拥有：木 ${resources.wood} · 铁 ${resources.iron} · 铝 ${resources.aluminum}`; return; }
+  const pos = buildPlacement();
+  if (Math.hypot(pos.x-P.x,pos.z-P.z)<3.6) return;
+  if (name !== "床" && walls.some(w => pos.x+1.65>w.x0 && pos.x-1.65<w.x1 && pos.y<w.y1 && pos.z+0.25>w.z0 && pos.z-0.25<w.z1)) {
+    buildBalanceEl.textContent = "这里被墙或建筑挡住了，请转向空地再放置。"; return;
+  }
+  const orient = Math.round(P.yaw / (Math.PI/2)) * (Math.PI/2);
+  if (name === "机枪炮台") {
+    makeRealTurret(pos.x,pos.y,pos.z,"T");
+    addBuildCollider(pos.x,pos.z,1.2,1.2,2.4);
+  } else if (name === "铁墙" || name === "铁门") {
+    const group = new THREE.Group();
+    const steel = new THREE.MeshStandardMaterial({ color:name==="铁门"?0x737d80:0x4c5557, metalness:0.72, roughness:0.4 });
+    if (name === "铁墙") {
+      const plate = new THREE.Mesh(new THREE.BoxGeometry(3.2,2.8,0.24),steel); plate.position.y=1.4; group.add(plate);
+      for (const x of [-1.35,1.35]) { const rivet=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,0.04,8),new THREE.MeshStandardMaterial({color:0xc0c6c4,metalness:0.8})); rivet.rotation.x=Math.PI/2; rivet.position.set(x,1.25,0.14); group.add(rivet); }
+      addBuildCollider(pos.x,pos.z,1.6,0.18,2.8);
+    } else {
+      for (const x of [-1.55,1.55]) { const post=new THREE.Mesh(new THREE.BoxGeometry(0.18,3,0.2),steel); post.position.set(x,1.5,0); group.add(post); }
+      const bar=new THREE.Mesh(new THREE.BoxGeometry(3.2,0.18,0.2),steel); bar.position.y=2.9; group.add(bar);
+      for(let x=-1.35;x<=1.36;x+=0.45){const rod=new THREE.Mesh(new THREE.BoxGeometry(0.1,2.7,0.12),steel);rod.position.set(x,1.45,0);group.add(rod);}
+      addBuildCollider(pos.x,pos.z,1.6,0.18,3);
+    }
+    group.position.set(pos.x,pos.y,pos.z); group.rotation.y=orient; scene.add(group);
+  } else if (name === "床") {
+    const group=new THREE.Group();
+    const iron=new THREE.MeshStandardMaterial({color:0x555d5d,metalness:0.65,roughness:0.5});
+    const cloth=new THREE.MeshStandardMaterial({color:0x77765c,roughness:0.9});
+    const frame=new THREE.Mesh(new THREE.BoxGeometry(1.15,0.16,2.15),iron);frame.position.y=0.4;group.add(frame);
+    const mattress=new THREE.Mesh(new THREE.BoxGeometry(1.08,0.3,2.05),cloth);mattress.position.y=0.62;group.add(mattress);
+    for(const x of [-0.48,0.48])for(const z of [-0.88,0.88]){const leg=new THREE.Mesh(new THREE.BoxGeometry(0.12,0.42,0.12),iron);leg.position.set(x,0.2,z);group.add(leg);}
+    const pillow=new THREE.Mesh(new THREE.BoxGeometry(0.72,0.18,0.4),new THREE.MeshStandardMaterial({color:0xbcb9a9}));pillow.position.set(0,0.84,-0.72);group.add(pillow);
+    group.position.set(pos.x,pos.y,pos.z);group.rotation.y=orient;scene.add(group);
+  }
+  resources.wood-=cost.wood; resources.iron-=cost.iron; resources.aluminum-=cost.aluminum;
+  refreshBuildBalance();
+  toggleBuildMenu(false);
+}
+for (const [name,cost] of Object.entries(buildCosts)) {
+  const button=document.createElement("button");
+  button.innerHTML=`${name}<br><small>${buildCostText(cost)}</small>`;
+  button.onclick=()=>buildAt(name);
+  buildItemsEl.appendChild(button);
+}
+
+// 城市：一排排的高楼，之间留出街道，可以自由探索
+function buildCity() {
+  const xs = [-112, -84, -56, -28, 28, 56, 84, 112];
+  for (const bx of xs) {
+    for (const bz of xs) {
+      if (Math.abs(bx) < 40 && Math.abs(bz) < 40) continue;
+      const w = 12 + Math.random() * 4, d = 12 + Math.random() * 4, h = 12 + Math.random() * 18;
+      const x0 = bx - w / 2, z0 = bz - d / 2;
+      // Knocked-out wall sections leave visible breaches while retaining nearby rubble.
+      const front = Math.random() < 0.5;
+      if (front) {
+        const gap = Math.min(4.5, w * 0.34), mid = x0 + w * (0.35 + Math.random() * 0.3);
+        addBox(x0, mid-gap/2, 0, h, z0, z0+d, "wall");
+        addBox(mid+gap/2, x0+w, 0, h, z0, z0+d, "wall");
+      } else {
+        const gap = Math.min(4.5, d * 0.34), mid = z0 + d * (0.35 + Math.random() * 0.3);
+        addBox(x0, x0+w, 0, h, z0, mid-gap/2, "wall");
+        addBox(x0, x0+w, 0, h, mid+gap/2, z0+d, "wall");
+      }
+      cityRects.push({ x0, x1: x0 + w, z0, z1: z0 + d });
+    }
+  }
+}
+
+function buildSciFiLandmark() {
+  const base = new THREE.Group();
+  const dark = new THREE.MeshStandardMaterial({ color: 0x30383a, metalness: 0.72, roughness: 0.42 });
+  const armor = new THREE.MeshStandardMaterial({ color: 0x59634e, metalness: 0.58, roughness: 0.5 });
+  const light = new THREE.MeshBasicMaterial({ color: 0x32d9e6 });
+  const slab = new THREE.Mesh(new THREE.BoxGeometry(13, 0.7, 13), dark); slab.position.y=0.35; base.add(slab);
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(5, 16, 5), armor); tower.position.set(0,8.3,0); base.add(tower);
+  const shoulder1 = new THREE.Mesh(new THREE.BoxGeometry(10, 4, 3), armor); shoulder1.position.set(-5,5.8,0); base.add(shoulder1);
+  const shoulder2 = shoulder1.clone(); shoulder2.position.x=5; base.add(shoulder2);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(7, 4, 4.5), dark); head.position.set(0,16.8,0); base.add(head);
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(5.2,0.42,0.16),light); visor.position.set(0,17.1,-2.32); base.add(visor);
+  const chest = new THREE.Mesh(new THREE.BoxGeometry(9,5,1),dark); chest.position.set(0,9.1,-2.25); base.add(chest);
+  for(const x of [-3.1,3.1]) { const eye=new THREE.Mesh(new THREE.SphereGeometry(0.22,12,8),light); eye.position.set(x,10,-2.9); base.add(eye); }
+  const beacon = new THREE.PointLight(0x20cfe0,2,28); beacon.position.set(0,18,0); base.add(beacon);
+  base.position.set(82,0,82); scene.add(base);
+  const label=document.createElement('div'); label.textContent='守望者纪念碑'; label.style.cssText='position:fixed;right:18px;top:14px;color:#63e8ef;text-shadow:0 0 8px #00c8ff;font-weight:bold;pointer-events:none;'; document.body.appendChild(label);
+}
+
+function buildForest() {
+  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x5d4037 });
+  for (let i = 0; i < 240; i++) {
+    const x = (Math.random() * 2 - 1) * 118, z = (Math.random() * 2 - 1) * 118;
+    if (Math.hypot(x, z) < 16 || inCity(x, z)) continue;
+    const g = new THREE.Group();
+    const h = 3 + Math.random() * 2.5;
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.3, h, 7), trunkMat);
+    trunk.position.y = h / 2;
+    g.add(trunk);
+    const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.6 + Math.random() * 0.6, 3.2, 8),
+      new THREE.MeshLambertMaterial({ color: 0x2e5a2e }));
+    leaves.position.y = h + 1.4;
+    g.add(leaves);
+    g.position.set(x, 0, z);
+    scene.add(g);
+    // 树干挡住移动、子弹和火箭弹
+    addDestructible(g, "tree", 3, { x0: x - 0.3, x1: x + 0.3, y0: 0, y1: 6, z0: z - 0.3, z1: z + 0.3 });
+  }
+}
+
+// 废弃汽车：sideways 为 true 时车身横放（碰撞盒也相应横放）
+function makeCar(x, z, sideways, color) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.9, 4.2), new THREE.MeshLambertMaterial({ color }));
+  body.position.y = 0.6;
+  g.add(body);
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.7, 2.2), new THREE.MeshLambertMaterial({ color: 0x3a4a5a }));
+  cabin.position.set(0, 1.35, -0.2);
+  g.add(cabin);
+  g.rotation.y = sideways ? Math.PI / 2 : 0;
+  g.position.set(x, 0, z);
+  scene.add(g);
+  const hw = sideways ? 2.1 : 1.0, hd = sideways ? 1.0 : 2.1;
+  addDestructible(g, "car", 4, { x0: x - hw, x1: x + hw, y0: 0, y1: 1.6, z0: z - hd, z1: z + hd });
+}
+
+function buildTank() {
+  const g = new THREE.Group();
+  const olive = new THREE.MeshLambertMaterial({ color: 0x4b5a2a });
+  const dark = new THREE.MeshLambertMaterial({ color: 0x222222 });
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.9, 4.4), olive);
+  hull.position.y = 0.7;
+  g.add(hull);
+  for (const sx of [-1.6, 1.6]) {
+    const track = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.8, 4.8), dark);
+    track.position.set(sx, 0.5, 0);
+    g.add(track);
+  }
+  const turret = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.6, 1.8), olive);
+  turret.position.set(0, 1.85, 0);
+  g.add(turret);
+  const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 0.82, 0.18, 16), dark);
+  ring.position.set(0, 1.45, 0); g.add(ring);
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 2.8, 10), dark);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 1.85, -2.0);
+  g.add(barrel);
+  for (const sx of [-1.91, 1.91]) {
+    for (let i = -2; i <= 2; i++) {
+      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.27, 0.12, 10), olive);
+      wheel.rotation.z = Math.PI / 2; wheel.position.set(sx, 0.5, i * 0.78); g.add(wheel);
+    }
+  }
+  const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.38, 0.16, 10), dark);
+  hatch.position.set(0.35, 2.24, 0.15); g.add(hatch);
+  const fpCabin = new THREE.Group();
+  const dash = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.24, 0.18), dark); dash.position.set(0, -0.3, -0.45); fpCabin.add(dash);
+  const sight = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.28, 0.12), new THREE.MeshLambertMaterial({ color: 0x6b713e })); sight.position.set(0, -0.03, -0.42); fpCabin.add(sight);
+  const slit = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.1, 0.04), new THREE.MeshBasicMaterial({ color: 0x83a4a1 })); slit.position.set(0, 0.12, -0.5); fpCabin.add(slit);
+  fpCabin.position.set(0, 2.4, 0); g.add(fpCabin); tank.fpCabin = fpCabin;
+  scene.add(g);
+  tank.mesh = g;
+}
+
+function resetTank() {
+  tank.x = -16; tank.z = 10; tank.yaw = 0; tank.y = 0;
+  tank.mesh.position.set(tank.x, 0, tank.z);
+  tank.mesh.rotation.y = 0;
+}
+
+// 坦克碰撞：用 3.2 x 4.8 的范围检查墙、树和车
+function tankBlocked(x, z) {
+  for (const w of walls) {
+    if (x + 1.6 > w.x0 && x - 1.6 < w.x1 && z + 2.4 > w.z0 && z - 2.4 < w.z1) return true;
+  }
+  return false;
+}
+
+function driveTank(dt) {
+  const t = tank;
+  if (keys.KeyA) { t.yaw += 1.6 * dt; P.yaw += 1.6 * dt; }
+  if (keys.KeyD) { t.yaw -= 1.6 * dt; P.yaw -= 1.6 * dt; }
+  let v = 0;
+  if (keys.KeyW) v = 6;
+  if (keys.KeyS) v = -3;
+  tank.trackSpin = (tank.trackSpin || 0) + v * dt;
+  const fx = -Math.sin(t.yaw), fz = -Math.cos(t.yaw);
+  const nx = t.x + fx * v * dt, nz = t.z + fz * v * dt;
+  if (!tankBlocked(nx, t.z)) t.x = nx;
+  if (!tankBlocked(t.x, nz)) t.z = nz;
+  // 坦克会压扁路上的僵尸
+  for (const zb of zombies) {
+    if (!zb.dead && Math.hypot(zb.x - t.x, zb.z - t.z) < 2) hurtZombie(zb, 3);
+  }
+  t.y = groundAt(t.x, t.z, t.y);
+  t.mesh.position.set(t.x, t.y, t.z);
+  t.mesh.rotation.y = t.yaw;
+  P.x = t.x; P.z = t.z; P.y = t.y;
+}
+
+function nearTank() {
+  return P.y < 1 && Math.hypot(tank.x - P.x, tank.z - P.z) < 4.5;
+}
+
+function interactVehicle() {
+  if (P.armorActive || P.turret) return;
+  if (P.flying) { exitPlane(); return; }
+  if (P.vehicle === tank) {
+    P.vehicle = null; engineStop(); P.x = tank.x + 3; P.z = tank.z; P.y = groundAt(P.x, P.z, 0); return;
+  }
+  if (nearPlane()) { enterPlane(); return; }
+  if (nearTank()) { P.vehicle = tank; initSound(); engineStart("tank"); P.yaw = tank.yaw; P.pitch = 0; return; }
+}
+
+// G 键：离开动力甲或操作炮台；载具统一使用 E 键
+function toggleVehicleOrTurret() {
+  if (P.armorActive) {
+    P.armorActive=false; P.armor=false; P.x=P.armorX+1.6; P.z=P.armorZ; P.y=groundAt(P.x,P.z,0); return;
+  }
+  if (P.flying || P.vehicle) return;
+  toggleTurret();
+}
+
+buildCity();
+addCityRubble();
+buildApartments();
+buildSciFiLandmark();
+buildForest();
+makeCar(-12, 12, false, 0x8b2e2e);
+makeCar(12, 14, true, 0x2e4f8b);
+makeCar(-22, -6, true, 0x7a7a2e);
+makeCar(20, -12, false, 0x6b6b6b);
+makeCar(-8, -22, true, 0x8b5a2e);
+makeCar(9, -24, false, 0x3e6b3e);
+buildTank();
+resetTank();
+buildPlane();
+
+// ================= 玩家 =================
+  const P = {
+  x: 0, y: 0, z: 12, vy: 0, yaw: 0, pitch: 0,
+  hp: 100, kills: 0, score: 0, weapon: 0, regenWait: 0, medkits: 1, respawns: 1, tankMG: false, reload: 0, reloadDuration:1.3, clip: 30, ammoMax: 30, armor: false, armorActive:false, armorX:-12, armorZ:22, armorYaw:0, armorFireCd:0,
+  turret: null, fireCd: 0, sawCd: 0, flash: 0, hurt: 0, kick: 0,
+};
+const WEAPON_NAMES = ["步枪", "火箭筒", "电锯", "喷火枪", "小刀", "拳头", "AK-47", "左轮手枪", "俄式手枪", "战斗步枪", "狼牙棒", "C4 炸弹", "加特林", "星际炮", "蝴蝶刀", "爪刀"];
+const keys = {};
+let running = false, over = false, locked = false, mouseDown = false;
+let time = 0;
+let rightDown = false, lastMX = 0, lastMY = 0;
+
+// 手持武器模型（挂在相机上）
+const gunRoot = new THREE.Group();
+camera.add(gunRoot);
+gunRoot.position.set(0.28, -0.26, -0.55);
+const reloadMag = new THREE.Group();
+reloadMag.add(new THREE.Mesh(new THREE.BoxGeometry(0.13,0.34,0.16),new THREE.MeshStandardMaterial({color:0x252c2e,metalness:0.62,roughness:0.42})));
+for(let i=0;i<3;i++){const round=new THREE.Mesh(new THREE.CylinderGeometry(0.018,0.018,0.12,6),new THREE.MeshStandardMaterial({color:0xc3a05b,metalness:0.65}));round.rotation.x=Math.PI/2;round.position.set((i-1)*0.035,0.19,0);reloadMag.add(round);}
+reloadMag.visible=false; gunRoot.add(reloadMag);
+const gunModels = [];
+function gunPart(geo, color, x, y, z, rx = 0) {
+  const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color, roughness: 0.38, metalness: color === 0x222222 || color === 0x333333 || color === 0x777777 ? 0.72 : 0.2 }));
+  m.position.set(x, y, z);
+  m.rotation.x = rx;
+  return m;
+}
+{
+  const metal = 0x343a3c, steel = 0x777d7c, polymer = 0x292d2b, wood = 0x514638;
+  const rifle = new THREE.Group();
+  rifle.add(gunPart(new THREE.BoxGeometry(0.17, 0.2, 0.43), metal, 0, 0.02, -0.13));
+  rifle.add(gunPart(new THREE.CylinderGeometry(0.035, 0.045, 0.55, 16), steel, 0, 0.045, -0.57, Math.PI/2));
+  rifle.add(gunPart(new THREE.CylinderGeometry(0.055, 0.06, 0.12, 16), polymer, 0, 0.045, -0.84, Math.PI/2));
+  rifle.add(gunPart(new THREE.BoxGeometry(0.115, 0.28, 0.18), wood, 0, -0.07, 0.26, -0.22));
+  rifle.add(gunPart(new THREE.BoxGeometry(0.12, 0.25, 0.19), polymer, 0, -0.21, -0.04, -0.15));
+  rifle.add(gunPart(new THREE.BoxGeometry(0.065, 0.23, 0.1), polymer, 0, -0.18, 0.035, -0.18));
+  rifle.add(gunPart(new THREE.BoxGeometry(0.22, 0.035, 0.32), polymer, 0, 0.13, -0.18));
+  rifle.add(gunPart(new THREE.BoxGeometry(0.045, 0.08, 0.08), steel, 0, 0.19, -0.22));
+  rifle.add(gunPart(new THREE.BoxGeometry(0.08, 0.1, 0.08), steel, 0, 0.19, -0.58));
+  rifle.add(gunPart(new THREE.BoxGeometry(0.08, 0.12, 0.13), metal, 0, 0.18, -0.35));
+  const rocket = new THREE.Group();
+  rocket.add(gunPart(new THREE.CylinderGeometry(0.1, 0.12, 1.0, 18), 0x586044, 0, 0.02, -0.24, Math.PI/2));
+  rocket.add(gunPart(new THREE.CylinderGeometry(0.105, 0.105, 0.11, 18), steel, 0, 0.02, -0.78, Math.PI/2));
+  rocket.add(gunPart(new THREE.ConeGeometry(0.1, 0.28, 18), 0x292d2b, 0, 0.02, -0.96, -Math.PI/2));
+  rocket.add(gunPart(new THREE.BoxGeometry(0.28, 0.035, 0.15), metal, 0, 0.08, 0.12));
+  rocket.add(gunPart(new THREE.BoxGeometry(0.14, 0.23, 0.2), polymer, 0, -0.15, 0.26));
+  rocket.add(gunPart(new THREE.BoxGeometry(0.16, 0.18, 0.24), wood, 0, -0.04, 0.48));
+  const saw = new THREE.Group();
+  saw.add(gunPart(new THREE.BoxGeometry(0.24, 0.3, 0.42), 0x8d3027, 0, 0, 0.06));
+  saw.add(gunPart(new THREE.CylinderGeometry(0.07, 0.08, 0.13, 14), metal, 0, 0.04, -0.16, Math.PI/2));
+  saw.add(gunPart(new THREE.BoxGeometry(0.075, 0.07, 0.58), steel, 0, 0.04, -0.5));
+  for (let i=0;i<12;i++) { const a=i*Math.PI/6; const tooth=gunPart(new THREE.ConeGeometry(0.035,0.09,4),0xc8cbc6,Math.sin(a)*0.055,0.09, -0.5+Math.cos(a)*0.27, Math.PI/2); tooth.rotation.z=a; saw.add(tooth); }
+  saw.add(gunPart(new THREE.BoxGeometry(0.08, 0.22, 0.12), polymer, 0, -0.22, 0.08));
+  saw.add(gunPart(new THREE.TorusGeometry(0.14, 0.025, 8, 18), steel, 0.18, 0.12, 0.12, Math.PI/2));
+  const flame = new THREE.Group();
+  flame.add(gunPart(new THREE.BoxGeometry(0.23, 0.28, 0.36), 0x873522, 0, -0.04, 0.11));
+  flame.add(gunPart(new THREE.CylinderGeometry(0.055, 0.075, 0.64, 16), steel, 0, 0.02, -0.36, Math.PI/2));
+  flame.add(gunPart(new THREE.CylinderGeometry(0.13, 0.09, 0.2, 16), metal, 0, 0.02, -0.75, Math.PI/2));
+  flame.add(gunPart(new THREE.CylinderGeometry(0.1, 0.1, 0.24, 16), polymer, 0, -0.17, 0.02));
+  flame.add(gunPart(new THREE.CylinderGeometry(0.085, 0.085, 0.26, 16), 0x687b35, 0, 0.19, 0.19));
+  flame.add(gunPart(new THREE.TorusGeometry(0.1, 0.018, 8, 16), steel, 0, 0.19, 0.19, Math.PI/2));
+  const knife=new THREE.Group(); knife.add(gunPart(new THREE.BoxGeometry(.07,.08,.26),polymer,0,-.08,.16)); knife.add(gunPart(new THREE.BoxGeometry(.055,.035,.48),steel,0,.01,-.16)); knife.add(gunPart(new THREE.ConeGeometry(.04,.24,8),steel,0,.01,-.51,-Math.PI/2));
+  const pistol=new THREE.Group(); pistol.add(gunPart(new THREE.BoxGeometry(.12,.14,.32),metal,0,.02,-.18)); pistol.add(gunPart(new THREE.CylinderGeometry(.035,.04,.38,14),steel,0,.02,-.48,Math.PI/2)); pistol.add(gunPart(new THREE.BoxGeometry(.1,.22,.14),wood,0,-.12,.02,-.18));
+  const fist=new THREE.Group(); fist.add(gunPart(new THREE.SphereGeometry(.16,10,8),0x53483d,0,-.03,-.12)); fist.add(gunPart(new THREE.BoxGeometry(.2,.12,.2),0x6b5948,0,-.15,.02));
+  const mace=new THREE.Group(); mace.add(gunPart(new THREE.CylinderGeometry(.055,.07,.7,12),wood,0,0,.05)); mace.add(gunPart(new THREE.SphereGeometry(.19,10,8),metal,0,.03,-.42)); for(let i=0;i<6;i++){const a=i*Math.PI/3; mace.add(gunPart(new THREE.ConeGeometry(.07,.22,6),steel,Math.sin(a)*.15,.03+Math.cos(a)*.15,-.42,-Math.PI/2));}
+  const c4=new THREE.Group(); c4.add(gunPart(new THREE.BoxGeometry(.32,.2,.42),0x3c4938,0,0,0)); c4.add(gunPart(new THREE.BoxGeometry(.16,.08,.14),0x292b24,0,.14,-.1));
+  const gatling=new THREE.Group(); gatling.add(gunPart(new THREE.BoxGeometry(.22,.22,.36),metal,0,0,.02)); for(let i=0;i<6;i++){const a=i*Math.PI/3; gatling.add(gunPart(new THREE.CylinderGeometry(.025,.03,.85,10),steel,Math.cos(a)*.11,Math.sin(a)*.11,-.48,Math.PI/2));}
+  const star=new THREE.Group(); star.add(gunPart(new THREE.BoxGeometry(.22,.27,.42),0x34484d,0,0,.04)); star.add(gunPart(new THREE.CylinderGeometry(.07,.12,.68,16),0x66c7d4,0,0,-.42,Math.PI/2)); star.add(gunPart(new THREE.TorusGeometry(.16,.035,8,16),0x35d9ff,0,0,-.48,Math.PI/2));
+  const ak=rifle.clone(); ak.add(gunPart(new THREE.BoxGeometry(.14,.26,.22),0x514638,0,-.18,.16));
+  const revolver=pistol.clone(); revolver.add(gunPart(new THREE.CylinderGeometry(.1,.1,.19,12),metal,0,.04,-.22,Math.PI/2));
+  const russianPistol=pistol.clone(); russianPistol.add(gunPart(new THREE.BoxGeometry(.16,.12,.14),steel,0,.13,-.22));
+  const battleRifle=rifle.clone(); battleRifle.add(gunPart(new THREE.BoxGeometry(.12,.12,.28),0x495253,0,.2,-.25));
+  const butterfly=new THREE.Group();
+  butterfly.add(gunPart(new THREE.BoxGeometry(.07,.09,.58),polymer,-.09,0,.08,.14));
+  butterfly.add(gunPart(new THREE.BoxGeometry(.07,.09,.58),metal,.09,0,.08,-.14));
+  butterfly.add(gunPart(new THREE.BoxGeometry(.045,.045,.48),steel,0,.02,-.42));
+  butterfly.add(gunPart(new THREE.ConeGeometry(.045,.2,8),steel,0,.02,-.72,-Math.PI/2));
+  butterfly.add(gunPart(new THREE.CylinderGeometry(.035,.035,.2,8),0xb9c1c0,0,0,.08,Math.PI/2));
+  const claw=new THREE.Group();
+  claw.add(gunPart(new THREE.BoxGeometry(.12,.12,.48),polymer,0,-.02,.12));
+  claw.add(gunPart(new THREE.TorusGeometry(.14,.035,8,18),steel,0,-.02,.36,Math.PI/2));
+  const curvedBlade=gunPart(new THREE.TorusGeometry(.3,.055,8,18,Math.PI*1.12),steel,0,.02,-.22,Math.PI/2); curvedBlade.rotation.z=Math.PI*.42; claw.add(curvedBlade);
+  claw.add(gunPart(new THREE.ConeGeometry(.055,.24,8),steel,.22,.02,-.48,-Math.PI/2));
+  for (const g of [rifle,rocket,saw,flame,knife,fist,ak,revolver,russianPistol,battleRifle,mace,c4,gatling,star,butterfly,claw]) { gunRoot.add(g); gunModels.push(g); }
+}
+function showGun() {
+  gunModels.forEach((g, i) => { g.visible = i === P.weapon; });
+}
+showGun();
+
+let loadoutOpen=false;
+const loadoutEl=$("loadout"), loadoutItems=$("loadoutItems");
+function buildLoadout(){
+  const choices=[...WEAPON_NAMES,"动力战甲","医疗包"];
+  loadoutItems.innerHTML="";
+  choices.forEach((name,i)=>{const b=document.createElement("button");b.textContent=name;b.onclick=()=>{if(i<WEAPON_NAMES.length){P.weapon=i;showGun();}else if(name==="动力战甲"){spawnArmor();}else if(name==="医疗包")useMedkit();};loadoutItems.appendChild(b);});
+}
+function toggleLoadout(){loadoutOpen=!loadoutOpen;loadoutEl.style.display=loadoutOpen?"flex":"none";mouseDown=false;}
+buildLoadout();
+const armorGroup=new THREE.Group();
+const armorUnits=[];
+function spawnArmor(){
+  const model=new THREE.Group();
+  const metal=new THREE.MeshStandardMaterial({color:0x354944,metalness:.72,roughness:.35});
+  const glow=new THREE.MeshBasicMaterial({color:0x45e7ed});
+  const add=(geo,mat,x,y,z)=>{const m=new THREE.Mesh(geo,mat);m.position.set(x,y,z);model.add(m);};
+  add(new THREE.BoxGeometry(1.25,1.45,.72),metal,0,1.35,0);
+  add(new THREE.BoxGeometry(1.55,.68,.85),metal,0,2.28,0);
+  add(new THREE.BoxGeometry(.62,.62,.62),metal,0,2.95,0);
+  add(new THREE.BoxGeometry(.42,.11,.04),glow,0,3,-.33);
+  for(const x of [-.98,.98]){add(new THREE.SphereGeometry(.38,12,10),metal,x,2.18,0);add(new THREE.BoxGeometry(.48,1.05,.5),metal,x*1.18,1.35,0);add(new THREE.BoxGeometry(.46,1.0,.48),metal,x*.56,.45,0);}
+  model.position.set(P.x-3,0,P.z);scene.add(model);
+  armorUnits.push({mesh:model,x:P.x-3,z:P.z,yaw:P.yaw});
+  P.armorUnit=armorUnits[armorUnits.length-1];P.armorActive=true;P.armor=true;P.armorX=P.armorUnit.x;P.armorZ=P.armorUnit.z;P.armorYaw=P.yaw;
+}
+function buildArmor(){
+  if(armorGroup.children.length || !P.armor)return;
+  const armorMat=new THREE.MeshStandardMaterial({color:0x354944,metalness:.72,roughness:.35});
+  const glowMat=new THREE.MeshBasicMaterial({color:0x45e7ed});
+  const part=(geo,mat,x,y,z)=>{const m=new THREE.Mesh(geo,mat);m.position.set(x,y,z);armorGroup.add(m);};
+  part(new THREE.BoxGeometry(.62,.75,.32),armorMat,0,-.12,.02);
+  part(new THREE.BoxGeometry(.82,.36,.4),armorMat,0,.23,.02);
+  part(new THREE.BoxGeometry(.3,.34,.3),armorMat,0,.56,.02);
+  part(new THREE.BoxGeometry(.24,.07,.04),glowMat,0,.59,-.145);
+  for(const x of [-.47,.47]){part(new THREE.SphereGeometry(.22,10,8),armorMat,x,.19,0);part(new THREE.BoxGeometry(.22,.48,.24),armorMat,x*1.15,-.28,0);part(new THREE.BoxGeometry(.21,.48,.24),armorMat,x*.58,-.68,0);}
+  scene.add(armorGroup); armorGroup.visible=true;
+}
+buildArmor();
+
+// ================= 僵尸 =================
+const zombies = [];
+const projectiles = [];
+const effects = [];
+function spawnZombie() {
+  for (let tries = 0; tries < 10; tries++) {
+    const ang = Math.random() * Math.PI * 2, r = 20 + Math.random() * 14;
+    const x = Math.max(-70, Math.min(70, P.x + Math.cos(ang) * r));
+    const z = Math.max(-70, Math.min(70, P.z + Math.sin(ang) * r));
+    if (inBuilding(x, z) || inCity(x, z)) continue;
+    const g = new THREE.Group();
+    const skin = new THREE.MeshLambertMaterial({ color: 0x6a9f5a });
+    const cloth = new THREE.MeshLambertMaterial({ color: 0x2e4a2e });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.4), cloth); body.position.y = 1.0; g.add(body);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.55, 0.55), skin); head.position.y = 1.8; g.add(head);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffee00 });
+    for (const sx of [-0.13, 0.13]) {
+      const e = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.08, 0.05), eyeMat);
+      e.position.set(sx, 1.85, 0.28); g.add(e);
+    }
+    for (const sx of [-0.2, 0.2]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.8, 0.22), cloth);
+      leg.position.set(sx, 0.4, 0); g.add(leg);
+    }
+    for (const sx of [-0.5, 0.5]) {
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.7, 0.2), skin);
+      arm.position.set(sx, 1.25, 0.25); arm.rotation.x = -0.9; g.add(arm);
+    }
+    scene.add(g);
+    zombies.push({ x, z, y: groundAt(x, z, 0), hp: 2, cool: 0, dead: false, mesh: g, phase: Math.random() * 6 });
+    return;
+  }
+}
+function hurtZombie(z, amt) {
+  if (z.dead) return;
+  z.hp -= amt;
+  if (z.hp <= 0) {
+    z.dead = true;
+    scene.remove(z.mesh);
+    P.kills++;
+    P.score += 100;
+  }
+}
+function updateZombies(dt) {
+  for (const z of zombies) {
+    if (z.dead) continue;
+    const dx = P.x - z.x, dz = P.z - z.z, d = Math.hypot(dx, dz);
+    if (d > 1.2) {
+      const sp = 2.2 * dt;
+      const nx = z.x + dx / d * sp, nz = z.z + dz / d * sp;
+      if (!hitsWall(nx, z.z, z.y)) z.x = nx;
+      if (!hitsWall(z.x, nz, z.y)) z.z = nz;
+    }
+    z.y = groundAt(z.x, z.z, z.y + 0.5);
+    z.cool -= dt;
+    if (d < 1.6 && Math.abs(P.y - z.y) < 2.5 && z.cool <= 0) {
+      z.cool = 1;
+      damage(10);
+    }
+    z.mesh.position.set(z.x, z.y + Math.abs(Math.sin(time * 6 + z.phase)) * 0.08, z.z);
+    z.mesh.rotation.y = Math.atan2(dx, dz);
+  }
+  for (let i = zombies.length - 1; i >= 0; i--) if (zombies[i].dead) zombies.splice(i, 1);
+}
+
+// ================= 伤害与效果 =================
+function damage(amount) {
+  if (over) return;
+  P.hp -= amount;
+  P.hurt = 0.25;
+  P.regenWait = 4;
+  if (P.hp <= 0) {
+    P.hp = 0;
+    if (P.respawns > 0) respawnPlayer();
+    else endGame();
+  }
+}
+
+function respawnPlayer() {
+  P.respawns--;
+  engineStop();
+  P.x = 0; P.y = groundAt(0, 12, 0); P.z = 12; P.vy = 0;
+  P.hp = 100; P.regenWait = 0; P.hurt = 0; P.flash = 0;
+  P.vehicle = null; P.turret = null; P.flying = false; P.tankFP = false;
+  P.armorActive = false; P.armor = false; P.tankMG = false;
+  resetTank(); resetPlane(); showGun();
+}
+
+function dirVec(yaw, pitch) {
+  return {
+    x: -Math.sin(yaw) * Math.cos(pitch),
+    y: Math.sin(pitch),
+    z: -Math.cos(yaw) * Math.cos(pitch),
+  };
+}
+function eyePos() {
+  if (P.turret) return { x: P.x, y: P.y + 1.4, z: P.z };
+  return { x: P.x, y: P.y + 1.65, z: P.z };
+}
+
+function tracer(a, b) {
+  const g = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(a.x, a.y, a.z), new THREE.Vector3(b.x, b.y, b.z)]);
+  const m = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xfff2a1, transparent:true, opacity:0.98, blending:THREE.AdditiveBlending }));
+  scene.add(m);
+  effects.push({ mesh: m, life: 0.13, maxLife:0.13, baseOpacity:0.98 });
+  const hot = new THREE.Line(g.clone(), new THREE.LineBasicMaterial({ color:0xff7428, transparent:true, opacity:0.72, blending:THREE.AdditiveBlending }));
+  scene.add(hot); effects.push({ mesh:hot, life:0.09, maxLife:0.09, baseOpacity:0.72 });
+}
+
+function muzzleSpark(o,d,color=0xffa33a,length=8) {
+  const start={x:o.x+d.x*.65,y:o.y+d.y*.65,z:o.z+d.z*.65};
+  const end={x:o.x+d.x*length,y:o.y+d.y*length,z:o.z+d.z*length};
+  const geo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(start.x,start.y,start.z),new THREE.Vector3(end.x,end.y,end.z)]);
+  const beam=new THREE.Line(geo,new THREE.LineBasicMaterial({color,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+  scene.add(beam); effects.push({mesh:beam,life:.11,maxLife:.11,baseOpacity:.95});
+  const flash=new THREE.Mesh(new THREE.SphereGeometry(.16,8,6),new THREE.MeshBasicMaterial({color,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+  flash.position.set(start.x,start.y,start.z); scene.add(flash); effects.push({mesh:flash,life:.08,maxLife:.08,baseOpacity:.95,grow:true});
+}
+
+// 子弹：找出最近的墙和僵尸
+function shootRay(o, d, dmg) {
+  let wallT = Infinity;
+  for (const w of walls) {
+    const t = rayBox(o, d, w);
+    if (t < wallT) wallT = t;
+  }
+  let hitZ = null, hitT = wallT;
+  for (const z of zombies) {
+    if (z.dead) continue;
+    const vx = z.x - o.x, vy = z.y + 1 - o.y, vz = z.z - o.z;
+    const t = vx * d.x + vy * d.y + vz * d.z;
+    if (t < 0 || t > hitT) continue;
+    const px = vx - d.x * t, py = vy - d.y * t, pz = vz - d.z * t;
+    if (px * px + py * py + pz * pz < 0.35 * 0.35 * 1.2) { hitZ = z; hitT = t; }
+  }
+  if (hitZ) hurtZombie(hitZ, dmg);
+  const len = Math.min(hitT, 60);
+  tracer(o, { x: o.x + d.x * len, y: o.y + d.y * len, z: o.z + d.z * len });
+  muzzleSpark(o,d,0xffaa42,Math.min(10,len));
+}
+
+function launchRocket(o, d, options={}) {
+  let m;
+  if (options.homing) {
+    m = new THREE.Group();
+    const shell = new THREE.MeshStandardMaterial({ color:0xc2c7c3, metalness:0.78, roughness:0.34 });
+    const dark = new THREE.MeshStandardMaterial({ color:0x374044, metalness:0.65, roughness:0.42 });
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.13,0.13,0.9,10),shell); body.rotation.x=Math.PI/2; m.add(body);
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.13,0.32,10),dark); nose.rotation.x=-Math.PI/2; nose.position.z=-0.58; m.add(nose);
+    for(const side of [-1,1]){const fin=new THREE.Mesh(new THREE.BoxGeometry(0.06,0.24,0.28),dark);fin.position.set(side*0.16,0,0.3);m.add(fin);}
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.09,0.38,8),new THREE.MeshBasicMaterial({color:0xff7a24})); flame.rotation.x=Math.PI/2; flame.position.z=0.62; m.add(flame);
+  } else {
+    m = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff9800 }));
+  }
+  scene.add(m);
+  const speed = options.homing ? 38 : 30;
+  muzzleSpark(o,d,options.homing?0xffb34e:0xff7730,7);
+  projectiles.push({ x: o.x + d.x * 0.55, y: o.y + d.y * 0.55, z: o.z + d.z * 0.55,
+    vx: d.x * speed, vy: d.y * speed, vz: d.z * speed, speed, homing:!!options.homing, life:options.homing?5:2, dead:false, mesh:m });
+}
+
+function explode(x, y, z) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10),
+    new THREE.MeshBasicMaterial({ color: 0xff9800, transparent: true, opacity: 0.8 }));
+  m.position.set(x, y, z);
+  scene.add(m);
+  effects.push({ mesh: m, life: 0.35, grow: true });
+  damageDestructibles(x, y, z, 3.5, 2);
+  for (const zb of zombies) {
+    if (zb.dead) continue;
+    const d = Math.hypot(zb.x - x, zb.y + 1 - y, zb.z - z);
+    if (d < 3.5) hurtZombie(zb, d < 1.8 ? 2 : 1);
+  }
+  // 火箭跳：爆炸离玩家近，就把玩家炸起来
+  const pd = Math.hypot(P.x - x, P.y + 0.9 - y, P.z - z);
+  if (pd < 3.2 && !P.turret) {
+    const pw = 1 - pd / 3.2;
+    P.vy = Math.max(P.vy, 9 * pw);
+    const nx = pd > 0.01 ? (P.x - x) / pd : 0, nz = pd > 0.01 ? (P.z - z) / pd : 0;
+    if (!hitsWall(P.x + nx * pw, P.z, P.y)) P.x += nx * pw;
+    if (!hitsWall(P.x, P.z + nz * pw, P.y)) P.z += nz * pw;
+    damage(14 * pw);
+  }
+}
+
+function updateProjectiles(dt) {
+  for (const r of projectiles) {
+    if (r.dead) continue;
+    r.life -= dt;
+    if (r.homing) {
+      let target = r.target && !r.target.dead ? r.target : null;
+      if (!target) {
+        let nearest = Infinity;
+        for (const z of zombies) if (!z.dead) {
+          const d = Math.hypot(z.x-r.x,z.y+1-r.y,z.z-r.z);
+          if (d < nearest) { nearest=d; target=z; }
+        }
+        r.target = target;
+      }
+      if (target) {
+        const desired = new THREE.Vector3(target.x-r.x,target.y+1-r.y,target.z-r.z).normalize();
+        const current = new THREE.Vector3(r.vx,r.vy,r.vz).normalize().lerp(desired,Math.min(1,dt*3)).normalize();
+        r.vx=current.x*r.speed; r.vy=current.y*r.speed; r.vz=current.z*r.speed;
+      }
+    }
+    r.x += r.vx * dt; r.y += r.vy * dt; r.z += r.vz * dt;
+    if (!r.homing) r.vy -= 4 * dt;
+    r.mesh.position.set(r.x, r.y, r.z);
+    if (r.homing) r.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1),new THREE.Vector3(r.vx,r.vy,r.vz).normalize());
+    let hit = r.life <= 0 || r.y < groundAt(r.x, r.z, r.y) + 0.1 || inWallPoint(r.x, r.y, r.z);
+    for (const zb of zombies) {
+      if (!zb.dead && Math.hypot(zb.x - r.x, zb.y + 1 - r.y, zb.z - r.z) < 0.9) hit = true;
+    }
+    if (hit) {
+      explode(r.x, r.y, r.z);
+      scene.remove(r.mesh);
+      r.dead = true;
+    }
+  }
+  for (let i = projectiles.length - 1; i >= 0; i--) if (projectiles[i].dead) projectiles.splice(i, 1);
+}
+
+function updateEffects(dt) {
+  for (const e of effects) {
+    e.life -= dt;
+    if (e.maxLife && e.mesh.material && e.mesh.material.transparent) e.mesh.material.opacity=e.baseOpacity*Math.max(0,e.life/e.maxLife);
+    if (e.grow) {
+      const s = 1 + (0.35 - e.life) * 8;
+      e.mesh.scale.set(s, s, s);
+    }
+  }
+  for (let i = effects.length - 1; i >= 0; i--) {
+    if (effects[i].life <= 0) {
+      const mesh=effects[i].mesh; scene.remove(mesh);
+      if(mesh.geometry) mesh.geometry.dispose();
+      if(Array.isArray(mesh.material)) mesh.material.forEach(m=>m.dispose());
+      else if(mesh.material) mesh.material.dispose();
+      effects.splice(i, 1);
+    }
+  }
+}
+
+// ================= 开火 =================
+function fireWeapon() {
+  if (P.reload > 0) return;
+  const o = eyePos();
+  const d = dirVec(P.yaw, P.pitch);
+  if (P.vehicle) {
+    if (P.fireCd > 0) return;
+    if(P.tankMG){ P.fireCd=.09; shootRay(o,d,1); sfxMachineGun(); return; }
+    P.fireCd = 1.5;
+    P.kick = 1;
+    launchRocket({ x: tank.x + d.x * 3, y: tank.y + 2 + d.y * 3, z: tank.z + d.z * 3 }, d);
+    sfxCannon();
+    return;
+  }
+  if (P.turret) {
+    if (P.fireCd > 0) return;
+    const mz = turretMuzzle(P.turret);
+    muzzleFlash(mz);
+    if (P.turret.type === "C") { P.fireCd = 1.2; launchRocket(mz, d); sfxCannon(); }
+    else { P.fireCd = 0.12; shootRay(mz, d, 1); if (P.turret.soundCd <= 0) { sfxMachineGun(); P.turret.soundCd = 0.12; } }
+    P.flash = 0.05;
+    return;
+  }
+  if (P.weapon === 0) {
+    if (P.fireCd > 0 || P.clip <= 0) return;
+    P.fireCd = 0.14;
+    P.clip--;
+    P.kick = 1;
+    P.flash = 0.05;
+    shootRay(o, d, 1);
+    sfxRifle();
+  } else if (P.weapon === 1) {
+    if (P.fireCd > 0) return;
+    P.fireCd = 0.9;
+    P.kick = 1;
+    launchRocket(o, d);
+    sfxBoom();
+  } else if ([6,9,7,8].includes(P.weapon)) {
+    if (P.fireCd>0 || P.clip<=0) return; P.clip--; P.fireCd=P.weapon===6||P.weapon===9?0.1:0.42;
+    shootRay(o,d,P.weapon===6?1.2:1); sfxRifle();
+  } else if (P.weapon===12) {
+    if(P.fireCd>0||P.clip<=0)return; P.clip--; P.fireCd=0.16; launchRocket(o,d); sfxCannon();
+  } else if (P.weapon===13) {
+    if(P.fireCd>0||P.clip<=0)return; P.clip--; P.fireCd=0.7;
+    blueMuzzle(o,d); launchRocket(o,d); sfxBoom();
+  } else if (P.weapon===11) {
+    if(P.fireCd>0)return; P.fireCd=0.8; launchRocket(o,d); sfxBoom();
+  } else if ([4,5,10,14,15].includes(P.weapon)) {
+    if(P.fireCd>0)return; P.fireCd=P.weapon===5?0.5:0.65; sfxSaw();
+    P.kick=0.8;
+    muzzleSpark(o,d,P.weapon===4||P.weapon===15?0xd8f4ff:0xffbd52,3.5);
+    const reach=P.weapon===10?3.0:P.weapon===14?2.45:P.weapon===15?2.3:1.8;
+    for(const z of zombies){const dx=z.x-P.x,dz=z.z-P.z,dist=Math.hypot(dx,dz); if(!z.dead&&dist<reach&&dist>0&&(dx*d.x+dz*d.z)/dist>0.55)hurtZombie(z,P.weapon===10||P.weapon===14||P.weapon===15?2:1);}
+  }
+}
+
+function blueMuzzle(o,d){
+  const p={x:o.x+d.x*1.1,y:o.y+d.y*1.1,z:o.z+d.z*1.1};
+  muzzleSpark(o,d,0x31cfff,11);
+  const glow=new THREE.Mesh(new THREE.SphereGeometry(.38,12,10),new THREE.MeshBasicMaterial({color:0x31cfff,transparent:true,opacity:.95,blending:THREE.AdditiveBlending})); glow.position.set(p.x,p.y,p.z); scene.add(glow); effects.push({mesh:glow,life:.13,grow:true});
+  const light=new THREE.PointLight(0x32cfff,3,8); light.position.set(p.x,p.y,p.z); scene.add(light); effects.push({mesh:light,life:.1});
+}
+
+function fireGatlingRocket(o,d) { launchRocket(o,d); }
+
+// 电锯：按住左键时对前方近距离僵尸造成伤害，并加速移动
+function updateSaw(dt) {
+  if (P.turret || P.vehicle || P.weapon !== 2 || !mouseDown) return;
+  P.sawCd -= dt;
+  if (P.sawCd > 0) return;
+  P.sawCd = 0.25;
+  sfxSaw();
+  P.kick=0.55;
+  const fx = -Math.sin(P.yaw), fz = -Math.cos(P.yaw);
+  muzzleSpark(eyePos(),dirVec(P.yaw,P.pitch),0xffd458,3.2);
+  for (const z of zombies) {
+    if (z.dead) continue;
+    const dx = z.x - P.x, dz = z.z - P.z, d = Math.hypot(dx, dz);
+    if (d > 2.2 || d < 0.01) continue;
+    if ((dx * fx + dz * fz) / d > 0.6) hurtZombie(z, 1);
+  }
+}
+
+// ================= 玩家移动与重力 =================
+function movePlayer(dt) {
+  let f = 0, s = 0;
+  if (keys.KeyW) f += 1;
+  if (keys.KeyS) f -= 1;
+  if (keys.KeyD) s += 1;
+  if (keys.KeyA) s -= 1;
+  const len = Math.hypot(f, s) || 1;
+  f /= len; s /= len;
+  const sawing = P.weapon === 2 && mouseDown;
+  const speed = (keys.ShiftLeft || keys.ShiftRight) ? 8 : sawing ? 6.5 : 5;
+  const sp = speed * dt;
+  const fx = -Math.sin(P.yaw), fz = -Math.cos(P.yaw);
+  const rx = Math.cos(P.yaw), rz = -Math.sin(P.yaw);
+  const mx = (fx * f + rx * s) * sp, mz = (fz * f + rz * s) * sp;
+  if (!hitsWall(P.x + mx, P.z, P.y)) P.x += mx;
+  if (!hitsWall(P.x, P.z + mz, P.y)) P.z += mz;
+
+  P.vy -= 22 * dt;
+  P.y += P.vy * dt;
+  const gy = groundAt(P.x, P.z, P.y);
+  if (P.y <= gy && P.vy <= 0) {
+    P.y = gy;
+    P.vy = 0;
+    P.onGround = true;
+  } else {
+    P.onGround = false;
+  }
+}
+
+// 炮台操作：按 G 进入或离开
+function toggleTurret() {
+  if (P.turret) {
+    P.turret = null;
+    P.z += 1.5;
+    P.y = groundAt(P.x, P.z, P.y);
+    return;
+  }
+  for (const t of turrets) {
+    if (Math.hypot(t.x - P.x, t.z - P.z) < 2.6 && Math.abs(t.y - P.y) < 1.5) {
+      P.turret = t;
+      P.x = t.x;
+      P.z = t.z + 0.9;
+      P.y = t.y;
+      P.vy = 0;
+      return;
+    }
+  }
+}
+
+function nearTurret() {
+  for (const t of turrets) {
+    if (Math.hypot(t.x - P.x, t.z - P.z) < 2.6 && Math.abs(t.y - P.y) < 1.5) return t;
+  }
+  return null;
+}
+
+// ================= 波次 =================
+let waveWait = 0;
+function startWave() {
+  P.wave++;
+  const n = 3 + P.wave * 2;
+  for (let i = 0; i < n; i++) spawnZombie();
+}
+
+// ================= 更新 =================
+function update(dt) {
+  if (!running || over) return;
+  if (lootNoticeTimer > 0) lootNoticeTimer=Math.max(0,lootNoticeTimer-dt);
+  if (plane.destroyed) {
+    plane.respawnTimer = Math.max(0, plane.respawnTimer - dt);
+    if (plane.respawnTimer === 0) resetPlane();
+  }
+  P.fireCd = Math.max(0, P.fireCd - dt);
+  if (P.flash > 0) P.flash -= dt;
+  if (P.hurt > 0) P.hurt -= dt;
+  if (P.kick > 0) P.kick = Math.max(0, P.kick - dt * 8);
+
+  if (P.regenWait > 0) P.regenWait -= dt;
+  else if (P.hp < 100) P.hp = Math.min(100, P.hp + 6 * dt);
+
+  if (P.turret) {
+    P.y = P.turret.y;
+  } else if (P.vehicle) {
+    driveTank(dt);
+  } else if (P.flying) {
+    planeFly(dt);
+  } else if(P.armorActive) {
+    const speed=keys.ShiftLeft?8:5.5, f=-Math.cos(P.armorYaw), r=Math.sin(P.armorYaw);
+    const vx=(-Math.sin(P.armorYaw)*(keys.KeyW?1:0)+Math.sin(P.armorYaw)*(keys.KeyS?1:0)+Math.cos(P.armorYaw)*(keys.KeyD?1:0)-Math.cos(P.armorYaw)*(keys.KeyA?1:0))*speed*dt;
+    const vz=(f*(keys.KeyW?1:0)-f*(keys.KeyS?1:0)-r*(keys.KeyD?1:0)+r*(keys.KeyA?1:0))*speed*dt;
+    P.armorX+=vx;P.armorZ+=vz;P.x=P.armorX;P.z=P.armorZ;P.yaw=P.armorYaw;
+    P.armorFireCd=Math.max(0,P.armorFireCd-dt);
+    if(mouseDown&&P.armorFireCd<=0){P.armorFireCd=.7;const d=dirVec(P.yaw,P.pitch),o={x:P.x,y:P.y+1.6,z:P.z};blueMuzzle(o,d);fireGatlingRocket(o,d);sfxBoom();}
+  } else {
+    movePlayer(dt);
+  }
+
+  if (!P.vehicle && !P.flying && !P.turret && !P.armorActive) collectLoot(false);
+
+  updateSaw(dt);
+  updateFlame(dt);
+  updateTurrets(dt);
+  if (P.vehicle) engineUpdate(keys.KeyW || keys.KeyS ? 0.8 : 0.2);
+  else if (P.flying) engineUpdate(plane.speed / 60);
+  if (plane.mesh) plane.mesh.visible = !P.flying || !plane.fp;
+  if(P.reload>0) {
+    P.reload=Math.max(0,P.reload-dt);
+    if(P.reload===0) P.clip=P.ammoMax;
+  }
+  if (mouseDown && !P.flying && (P.weapon !== 2 || P.turret || P.vehicle) && !loadoutOpen && !buildOpen) fireWeapon();
+
+  updateZombies(dt);
+  updateProjectiles(dt);
+  updateEffects(dt);
+
+  if (zombies.length === 0) {
+    waveWait += dt;
+    if (waveWait > 2.5) { waveWait = 0; startWave(); }
+  }
+
+  // 手持武器的后坐力和走路晃动
+  const moving = keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD;
+  const bob = moving && !P.turret ? Math.sin(time * 9) * 0.012 : 0;
+  const reloadProgress=P.reload>0?1-P.reload/P.reloadDuration:0;
+  const reloadDip=P.reload>0?Math.sin(reloadProgress*Math.PI):0;
+  gunRoot.position.set(0.28, -0.26 + bob - reloadDip*0.2, -0.55 + P.kick * 0.08);
+  gunRoot.rotation.set(P.kick*0.15+reloadDip*0.38,0,P.reload>0?Math.sin(reloadProgress*Math.PI*2)*0.16:0);
+  reloadMag.visible=P.reload>0&&reloadProgress>0.2&&reloadProgress<0.82;
+  reloadMag.position.set(0,-0.34-Math.sin(Math.PI*Math.max(0,Math.min(1,(reloadProgress-0.2)/0.62)))*0.55,0.02);
+  gunRoot.visible = !P.vehicle && !P.turret && !P.flying && !P.armor && !loadoutOpen;
+  for(const unit of armorUnits){unit.mesh.visible=true;}
+  if(P.armorActive && P.armorUnit){P.armorUnit.x=P.armorX;P.armorUnit.z=P.armorZ;P.armorUnit.yaw=P.armorYaw;P.armorUnit.mesh.position.set(P.armorX,P.y,P.armorZ);P.armorUnit.mesh.rotation.y=P.armorYaw;}
+}
+
+function updateCamera() {
+  if(P.armorActive){const fw=dirVec(P.armorYaw,0);camera.position.set(P.armorX+fw.x*.25,P.y+2.65,P.armorZ+fw.z*.25);camera.rotation.set(P.pitch,P.armorYaw,0,"YXZ");return;}
+  if (P.flying) {
+    if (plane.fp) {
+      const fwd = dirVec(P.yaw, 0);
+      camera.position.set(plane.x + fwd.x * 0.65, plane.y + 1.15, plane.z + fwd.z * 0.65);
+      camera.rotation.set(P.pitch, P.yaw, 0, "YXZ");
+    } else {
+      const back = dirVec(P.yaw, 0), look = dirVec(P.yaw, P.pitch);
+      camera.position.set(plane.x - back.x * 9, plane.y + 4.2, plane.z - back.z * 9);
+      camera.lookAt(plane.x + look.x * 8, plane.y + 1 + look.y * 8, plane.z + look.z * 8);
+    }
+    return;
+  }
+  if (P.vehicle) {
+    const t = P.vehicle;
+    if (P.tankFP) {
+      const local = new THREE.Vector3(0, 2.55, -0.35).applyAxisAngle(new THREE.Vector3(0,1,0), t.yaw);
+      camera.position.set(t.x + local.x, t.y + local.y, t.z + local.z);
+      const sight = t.fpCabin && t.fpCabin.children[1];
+      if (sight) sight.visible = false;
+      if (t.fpCabin) t.fpCabin.visible = true;
+    } else {
+      camera.position.set(t.x + Math.sin(P.yaw) * 7, t.y + 3.6, t.z + Math.cos(P.yaw) * 7);
+      if (t.fpCabin) {
+        t.fpCabin.visible = true;
+        const sight = t.fpCabin.children[1]; if (sight) sight.visible = true;
+      }
+    }
+    camera.rotation.set(P.pitch, P.yaw, 0, "YXZ");
+    return;
+  }
+  if (P.turret) {
+    camera.position.set(P.x, P.y + 1.4, P.z);
+  } else {
+    camera.position.set(P.x, P.y + 1.65, P.z);
+  }
+  camera.rotation.set(P.pitch, P.yaw, 0, "YXZ");
+}
+
+function updateHUD() {
+  const fl = P.y < 3.5 ? "一楼" : P.y < 7.5 ? "二楼" : "天台";
+  const near = !P.turret && nearTurret();
+  const weapon = P.flying ? "战斗机" : P.vehicle ? "坦克" : P.turret ? (P.turret.type === "C" ? "大炮" : "机枪") : WEAPON_NAMES[P.weapon];
+  const lootNear = lootItems.some(a=>Math.hypot(a.x-P.x,a.z-P.z)<12 && Math.abs(P.y-a.y)<4.5);
+  hudEl.innerHTML =
+    `分数 ${P.score} ｜ 击杀 ${P.kills} ｜ 第 ${P.wave} 波 ｜ 剩余僵尸 ${zombies.length} ｜ 重生机会 ${P.respawns}<br>` +
+    `位置：${fl}` +
+    (near ? `<br>按 G 操作${near.type === "C" ? "大炮" : "机枪"}` : "") +
+    (P.turret ? `<br>操作中，按 G 离开` : "") +
+    (P.vehicle ? `<br>驾驶坦克：W/S 前进后退，A/D 转车身，鼠标瞄准，左键开炮，E 下车` : "") +
+    (!P.vehicle && !P.turret && nearTank() ? `<br>按 E 驾驶坦克` : "") +
+    (P.vehicle ? `<br>坦克按 2 切换机枪模式，V 切换第一人称` : "") +
+    (P.armorActive ? `<br>驾驶动力甲：WASD 移动，鼠标瞄准，左键星际炮（蓝焰），G 离开` : "") +
+    (P.flying ? `<br>速度 ${Math.round(plane.speed * 4)} ｜ 高度 ${Math.round(plane.y)}<br>空格可原地起飞/上升，左 Ctrl 下降；W/S 加减速，鼠标操纵机头，左键机炮，Q 机腹追踪导弹，B 投弹，V 切换机舱视角，E 离机` : "") +
+    (!P.flying && !P.vehicle && !P.turret && nearPlane() ? `<br>按 E 登上战斗机` : "") +
+    (plane.destroyed ? `<br>战机已坠毁，${Math.ceil(plane.respawnTimer)} 秒后重新生成` : "");
+  if (!P.flying && !P.vehicle && !P.turret && lootNear) hudEl.innerHTML += `<br>靠近自动拾取，或按 E 搜刮附近材料`;
+  if (lootNoticeTimer > 0) hudEl.innerHTML += `<br><strong style="color:#b9e48c">拾取：${lootNotice}</strong>`;
+  if (!P.flying && !P.vehicle && !P.turret) hudEl.innerHTML += `<br>坦克位置约 (-16, 10)｜战机在公寓外侧空地 (10, -10)`;
+  bhudEl.innerHTML =
+    `<span>血量 ${Math.round(P.hp)}</span> ｜ <span>${weapon}</span> ｜ 弹药 ∞` +
+    `<br><span>材料：木 ${resources.wood} ｜ 铁 ${resources.iron} ｜ 铝 ${resources.aluminum} ｜ 医疗包 ${P.medkits}（H 使用）</span>` +
+    (P.reload>0 ? `<br><span style="color:#ffd166">换弹中…</span>` : "") +
+    `<br><span style="opacity:.8">1 步枪 ｜ 2 火箭筒／坦克机枪 ｜ 3 电锯 ｜ 4 喷火枪 ｜ 空格跳跃 ｜ G 炮台 ｜ B 建造基地</span>`;
+  flashEl.style.opacity = P.hurt > 0 ? 1 : 0;
+}
+
+// ================= 开始、暂停、结束 =================
+function resetGame() {
+  for (const z of zombies) scene.remove(z.mesh);
+  zombies.length = 0;
+  for (const r of projectiles) scene.remove(r.mesh);
+  projectiles.length = 0;
+  for (const e of effects) scene.remove(e.mesh);
+  effects.length = 0;
+  Object.assign(P, { x: 0, y: 0, z: 12, vy: 0, yaw: 0, pitch: 0, hp: 100, kills: 0, score: 0, medkits: 1, respawns: 1, tankMG: false, armorActive:false,
+    weapon: 0, regenWait: 0, reload:0, clip:30, turret: null, vehicle: null, flying: false, tankFP: false, fireCd: 0, sawCd: 0, flash: 0, hurt: 0, kick: 0, wave: 0 });
+  over = false;
+  waveWait = 0;
+  showGun();
+  resetTank();
+  resetPlane();
+  startWave();
+}
+
+function begin() {
+  resetGame();
+  running = true;
+  overlay.style.display = "none";
+}
+
+function endGame() {
+  over = true;
+  mouseDown = false;
+  document.exitPointerLock();
+  titleEl.textContent = "游戏结束";
+  descEl.innerHTML = `得分 ${P.score}，击杀 ${P.kills} 只僵尸，坚持到第 ${P.wave} 波`;
+  startBtn.textContent = "再来一次";
+  overlay.style.display = "flex";
+}
+
+startBtn.addEventListener("click", () => {
+  initSound();
+  if (!running || over) begin();
+  overlay.style.display = "none";
+  renderer.domElement.requestPointerLock();
+});
+
+renderer.domElement.addEventListener("click", () => {
+  if (running && !over && !locked) renderer.domElement.requestPointerLock();
+});
+
+document.addEventListener("pointerlockchange", () => {
+  locked = document.pointerLockElement === renderer.domElement;
+  if (!locked && running && !over) {
+    mouseDown = false;
+    titleEl.textContent = "暂停";
+    descEl.textContent = "按下面的按钮继续";
+    startBtn.textContent = "继续";
+    overlay.style.display = "flex";
+  }
+});
+
+document.addEventListener("mousemove", e => {
+  if (!running || over) return;
+  let dx = 0, dy = 0;
+  if (locked) {
+    dx = e.movementX;
+    dy = e.movementY;
+  } else if (rightDown) {
+    dx = e.clientX - lastMX;
+    dy = e.clientY - lastMY;
+    lastMX = e.clientX;
+    lastMY = e.clientY;
+  } else {
+    return;
+  }
+  P.yaw -= dx * 0.0022;
+  P.pitch -= dy * 0.0022;
+  P.pitch = Math.max(-1.45, Math.min(1.45, P.pitch));
+});
+
+renderer.domElement.addEventListener("contextmenu", e => e.preventDefault());
+renderer.domElement.addEventListener("mousedown", e => {
+  if (e.button === 0) mouseDown = true;
+  if (e.button === 2) { rightDown = true; lastMX = e.clientX; lastMY = e.clientY; }
+});
+addEventListener("mouseup", e => {
+  if (e.button === 0) mouseDown = false;
+  if (e.button === 2) rightDown = false;
+});
+
+addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (running && !over && !P.turret && !P.vehicle && !P.flying && P.onGround) P.vy = 8.5;
+  } else if (e.code === "Digit1") { P.weapon = 0; showGun(); }
+  else if (e.code === "Digit2") { if (P.vehicle) P.tankMG = !P.tankMG; else { P.weapon = 1; showGun(); } }
+  else if (e.code === "Digit3") { P.weapon = 2; showGun(); }
+  else if (e.code === "Digit4") { P.weapon = 3; showGun(); }
+  else if (e.code === "KeyG" && running && !over) { toggleVehicleOrTurret(); }
+  else if (e.code === "KeyE" && !e.repeat && running && !over) {
+    if (!P.flying && !P.vehicle && !P.turret && !P.armorActive && collectLoot(true)) { /* picked up the closest nearby drop */ }
+    else if (P.flying || P.vehicle || nearPlane() || nearTank()) interactVehicle();
+  }
+  else if (e.code === "KeyH" && running && !over) { useMedkit(); }
+  else if (e.code === "KeyQ" && running && !over && P.flying) { planeMissile(); }
+  else if (e.code === "KeyB" && !e.repeat && running && !over) { if (P.flying) planeBomb(); else toggleBuildMenu(); }
+  else if (e.code === "Escape" && buildOpen) { toggleBuildMenu(false); }
+  else if (e.code === "KeyV" && running && !over && P.vehicle) { P.tankFP = !P.tankFP; }
+  else if (e.code === "KeyV" && running && !over && P.flying) { plane.fp = !plane.fp; }
+  else if (e.code === "KeyF") { toggleLoadout(); }
+  else if (e.code === "KeyR" && !e.repeat && running && !over && P.reload<=0) { P.reload=P.reloadDuration; sfxShot(); }
+});
+addEventListener("keyup", e => {
+  keys[e.code] = false;
+});
+
+function releaseAll() {
+  for (const k in keys) keys[k] = false;
+  mouseDown = false;
+}
+addEventListener("blur", releaseAll);
+document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
+
+descEl.innerHTML =
+  "WASD 移动，Shift 冲刺，空格跳跃<br>" +
+  "射击：鼠标左键或 F 键（按住连射）｜ R 换弹（可见装填动作）｜ 转视角：移动鼠标，或按住右键拖动<br>" +
+  "1 步枪，2 火箭筒，3 电锯，4 喷火枪；F 打开装备菜单，含蝴蝶刀和爪刀<br>" +
+  "走上斜坡进公寓二楼，靠近炮台按 G 操作，僵尸会靠近咬你<br>" +
+  "靠近材料箱按 E 搜刮木材、铁、铝和药品；按 B 打开建造菜单，在面前建造机枪炮台、铁门、铁墙或床。坦克停在城市西侧，战斗机停在公寓外侧空地，两种载具靠近后都按 E 驾驶/登机，再按 E 下车/离机。战机位置约 (10, -10)，黄色光柱标出位置。坦克：W/S 前后，A/D 转向，左键开炮，V 坦克舱视角。战机：空格可原地起飞/上升，左 Ctrl 下降；W/S 加减速，V 座舱视角，Q 从机腹释放追踪僵尸的导弹，B 投弹，左键机炮。";
+
+// ================= 主循环 =================
+let last = performance.now(), lastHudUpdate = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  time += dt;
+  update(dt);
+  updateCamera();
+  if (now - lastHudUpdate > 120) { updateHUD(); lastHudUpdate = now; }
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
